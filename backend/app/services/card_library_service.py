@@ -4,8 +4,10 @@ import re
 import shutil
 import threading
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal
 from uuid import uuid4
+
+from fastapi import HTTPException
 
 from app.core.config import Settings, get_settings
 from app.models.card_blueprint import (
@@ -15,6 +17,8 @@ from app.models.card_blueprint import (
     BlueprintProvenance,
     BlueprintRuntimeRequirement,
     BlueprintRuntimeRequirements,
+    BlueprintReviewIssue,
+    BlueprintReviewResult,
     CardBlueprint,
     CardBlueprintDraft,
     CardBlueprintDraftIndexEntry,
@@ -29,13 +33,15 @@ from app.models.card_blueprint import (
     UpdateProjectDraftRequest,
 )
 from app.models.cards import Card, CardAssetRef
-from app.models.executor import ExecutorContext, RuntimeBindings
+from app.models.executor import ExecutorContext, ExecutorReference, RuntimeBindings
 from app.models.graph import Asset, GraphState
 from app.models.output_contracts import CardOutputSpec, normalize_output_format
 from app.services.asset_materialization_service import AssetMaterializationService
 from app.services.project_service import ProjectService
 from app.services.runtime_dependency_resolver_service import RuntimeDependencyResolverService
 from app.services.blueprint_review_worker import BlueprintReviewWorker
+from app.services.card_desensitization_service import CardDesensitizationService
+from app.services.reference_data_service import ReferenceDataService, ReferenceDataError
 from app.services.utils import atomic_write_json, read_json, utc_now
 
 try:
@@ -282,7 +288,58 @@ class CardLibraryService:
         bp_path = self._blueprint_dir(blueprint_id) / "blueprint.json"
         if not bp_path.exists():
             raise ValueError(f"Blueprint not found: {blueprint_id}")
-        return read_json(bp_path, {})
+        data = read_json(bp_path, {})
+        return CardBlueprint.model_validate(data).model_dump()
+
+    def reference_usage(self, ref_id: str) -> list[dict[str, Any]]:
+        """Return all global blueprints and project drafts that reference *ref_id*."""
+        usages: list[dict[str, Any]] = []
+
+        # Global blueprints
+        blueprints_dir = self._root / "blueprints"
+        if blueprints_dir.exists():
+            for bp_dir in blueprints_dir.iterdir():
+                bp_path = bp_dir / "blueprint.json"
+                if not bp_path.is_file():
+                    continue
+                try:
+                    bp = CardBlueprint.model_validate(read_json(bp_path, {}))
+                except Exception:
+                    continue
+                if any(asset.ref_id == ref_id for asset in bp.reference_assets):
+                    usages.append({
+                        "type": "blueprint",
+                        "blueprint_id": bp.blueprint_id,
+                        "title": bp.title,
+                    })
+
+        # Project drafts
+        for summary in self.project_service.list_projects():
+            if summary.status == "error":
+                continue
+            project_root = summary.project_root or str(self.project_service.project_path(summary.project_id))
+            if not project_root:
+                continue
+            drafts_dir = Path(project_root) / "card-library-drafts" / "drafts"
+            if not drafts_dir.exists():
+                continue
+            for draft_dir in drafts_dir.iterdir():
+                draft_path = draft_dir / "blueprint.json"
+                if not draft_path.is_file():
+                    continue
+                try:
+                    draft = CardBlueprintDraft.model_validate(read_json(draft_path, {}))
+                except Exception:
+                    continue
+                if any(asset.ref_id == ref_id for asset in draft.blueprint.reference_assets):
+                    usages.append({
+                        "type": "draft",
+                        "project_id": summary.project_id,
+                        "draft_id": draft.draft_id,
+                        "title": draft.blueprint.title,
+                    })
+
+        return usages
 
     def _build_blueprint_from_card(self, project_id: str, card_id: str) -> CardBlueprint:
         """Extract, desensitize, and build a CardBlueprint from a project card."""
@@ -492,7 +549,7 @@ class CardLibraryService:
 
         return CreateProjectDraftResponse(
             draft_id=draft_id,
-            warnings=["已加入项目牌库，请执行规则审查后再发布"],
+            warnings=["已加入分析卡草稿，请执行规则审查后再发布"],
         )
 
     def list_project_drafts(self, project_id: str) -> list[dict[str, Any]]:
@@ -507,7 +564,8 @@ class CardLibraryService:
         draft_path = self._project_draft_dir(project_id, draft_id) / "blueprint.json"
         if not draft_path.exists():
             raise ValueError(f"Draft not found: {draft_id} in project {project_id}")
-        return read_json(draft_path, {})
+        data = read_json(draft_path, {})
+        return CardBlueprintDraft.model_validate(data).model_dump()
 
     def delete_project_draft(self, project_id: str, draft_id: str) -> dict[str, Any]:
         """Delete a project draft."""
@@ -526,24 +584,49 @@ class CardLibraryService:
         return {"ok": True, "draft_id": draft_id}
 
     def review_project_draft(self, project_id: str, draft_id: str) -> dict[str, Any]:
-        """Run rule-based review on a project draft and update its status."""
+        """Generalize the draft (best-effort, OUTSIDE the project lock), then run
+        the rule-based review on the candidate to verify it is clean, and update
+        the draft status.
+
+        The desensitization LLM call is network-bound (up to ~90s), so it runs
+        outside the project lock: snapshot under lock -> release -> generalize
+        -> re-acquire and refuse to clobber if the draft changed concurrently.
+        The agent runs FIRST (it fixes project-name/path/asset-id leakage); the
+        rule review then verifies the generalized candidate is clean.
+        """
         lock = self.project_service.lock_for(project_id)
+
+        # 1. Snapshot under lock.
         with lock:
             draft_data = self.get_project_draft(project_id, draft_id)
             draft = CardBlueprintDraft.model_validate(draft_data)
+            project_name = self.project_service.graph_store(project_id).load_project_state().name
+            snapshot_updated_at = draft.updated_at
 
-            store = self.project_service.graph_store(project_id)
-            project_state = store.load_project_state()
-            project_name = project_state.name
+        # 2. Generalize outside the lock (network, best-effort).
+        candidate, gen_meta = self._generalize_candidate(draft.blueprint, project_name)
 
-            review = BlueprintReviewWorker().review(draft.blueprint, project_name=project_name)
+        # 3. Re-acquire; abort if concurrently modified.
+        with lock:
+            fresh_data = self.get_project_draft(project_id, draft_id)
+            fresh = CardBlueprintDraft.model_validate(fresh_data)
+            if fresh.updated_at != snapshot_updated_at:
+                raise HTTPException(
+                    status_code=409,
+                    detail="Draft was modified during review; please retry.",
+                )
+
+            review = BlueprintReviewWorker().review(candidate, project_name=project_name)
+            review = self._annotate_review(review, gen_meta)
+
             status_map = {"pass": "approved", "warn": "needs_review", "fail": "rejected"}
-            draft.status = status_map[review.verdict]
-            draft.review = review
-            draft.updated_at = utc_now()
+            fresh.status = status_map[review.verdict]
+            fresh.review = review
+            fresh.blueprint = candidate
+            fresh.updated_at = utc_now()
 
             draft_dir = self._project_draft_dir(project_id, draft_id)
-            atomic_write_json(draft_dir / "blueprint.json", draft.model_dump())
+            atomic_write_json(draft_dir / "blueprint.json", fresh.model_dump())
 
             index_data = self._read_project_draft_index(project_id)
             entries = index_data.get("entries", [])
@@ -551,11 +634,11 @@ class CardLibraryService:
                 if entry.get("draft_id") == draft_id:
                     entries[i] = self._draft_index_entry_from_blueprint(
                         draft_id=draft_id,
-                        status=draft.status,
-                        blueprint=draft.blueprint,
-                        global_blueprint_id=draft.global_blueprint_id,
-                        created_at=draft.created_at,
-                        updated_at=draft.updated_at,
+                        status=fresh.status,
+                        blueprint=fresh.blueprint,
+                        global_blueprint_id=fresh.global_blueprint_id,
+                        created_at=fresh.created_at,
+                        updated_at=fresh.updated_at,
                     )
                     break
             index_data["entries"] = entries
@@ -563,9 +646,89 @@ class CardLibraryService:
 
             return {
                 "draft_id": draft_id,
-                "status": draft.status,
-                "review": review.model_dump(),
+                "status": fresh.status,
+                "review": fresh.review.model_dump(),
             }
+
+    def _generalize_candidate(
+        self,
+        blueprint: CardBlueprint,
+        project_name: str,
+    ) -> tuple[CardBlueprint, dict[str, Any]]:
+        """Run the desensitization agent best-effort; return (candidate, meta).
+
+        ``candidate`` is the (possibly generalized) blueprint to feed into rule
+        review. ``meta`` records whether generalization applied and why/why not.
+        """
+        meta: dict[str, Any] = {"applied": False}
+        try:
+            gen = CardDesensitizationService(self.settings).generalize(blueprint, project_name=project_name)
+        except Exception:
+            gen = None
+        if gen is None:
+            meta["reason"] = "unavailable"
+            return blueprint, meta
+
+        # Structural guard: the agent may rename slots, but must not drop required
+        # inputs (count-based heuristic — human can still 修正 before publish).
+        required_before = sum(1 for s in blueprint.inputs_schema if s.required)
+        required_after = sum(1 for s in gen.inputs_schema if s.required)
+        if required_after < required_before:
+            meta["reason"] = "dropped_required_inputs"
+            return blueprint, meta
+
+        candidate = blueprint.model_copy(
+            update={
+                "title": gen.title,
+                "summary": gen.summary,
+                "tags": gen.tags,
+                "domain": gen.domain,
+                "use_cases": gen.use_cases,
+                "inputs_schema": gen.inputs_schema,
+                "outputs_schema": gen.outputs_schema,
+                "instruction_blocks": gen.instruction_blocks,
+            }
+        )
+        meta.update({"applied": True, "confidence": gen.confidence, "notes": gen.notes})
+        return candidate, meta
+
+    @staticmethod
+    def _annotate_review(review: BlueprintReviewResult, gen_meta: dict[str, Any]) -> BlueprintReviewResult:
+        """Append generalization context to the rule review and re-derive verdict."""
+        issues = list(review.issues)
+        if gen_meta.get("applied"):
+            confidence = gen_meta.get("confidence", "medium")
+            notes = gen_meta.get("notes")
+            message = f"已自动泛化为通用契约（置信度 {confidence}）。"
+            if notes:
+                message += f" 备注：{notes}"
+            issues.append(BlueprintReviewIssue(severity="info", field="generalization", message=message))
+            if confidence == "low":
+                issues.append(
+                    BlueprintReviewIssue(
+                        severity="warning",
+                        field="generalization",
+                        message="泛化置信度较低，建议人工 修正 后再发布。",
+                    )
+                )
+        else:
+            reason = gen_meta.get("reason", "unavailable")
+            issues.append(
+                BlueprintReviewIssue(
+                    severity="info",
+                    field="generalization",
+                    message=f"自动泛化未生效（{reason}），已采用规则审查结果。",
+                )
+            )
+
+        severities = [issue.severity for issue in issues]
+        if "error" in severities:
+            verdict: Literal["pass", "warn", "fail"] = "fail"
+        elif "warning" in severities:
+            verdict = "warn"
+        else:
+            verdict = "pass"
+        return BlueprintReviewResult(verdict=verdict, summary=review.summary, issues=issues)
 
     def publish_project_draft(self, project_id: str, draft_id: str) -> PublishDraftResponse:
         """Publish an approved project draft to the global card library.
@@ -693,6 +856,11 @@ class CardLibraryService:
                 rr.python.packages = updates.python_packages
             if updates.r_packages is not None and isinstance(rr.r, BlueprintRuntimeRequirement):
                 rr.r.packages = updates.r_packages
+
+            if updates.use_cases is not None:
+                bp.use_cases = updates.use_cases
+            if updates.reference_assets is not None:
+                bp.reference_assets = updates.reference_assets
 
             now = utc_now()
             draft.blueprint = bp
@@ -928,6 +1096,28 @@ class CardLibraryService:
                         f"R runtime requirement cannot be satisfied: {plan.message or plan.status}"
                     )
 
+        # ── Validate + resolve reference-data dependencies ───────────────
+        # Reference data are environment-level files (GTF/FASTA/...) resolved
+        # to host paths here and passed to the executor as file references.
+        resolved_references: list[ExecutorReference] = []
+        reference_paths: dict[str, str] = {}
+        if bp.reference_assets:
+            ref_service = ReferenceDataService(self.settings)
+            for ref in bp.reference_assets:
+                try:
+                    host_path = ref_service.resolve(ref.ref_id)
+                except ReferenceDataError:
+                    if ref.required:
+                        blockers.append(
+                            f"Required reference data '{ref.role}' (ref_id: {ref.ref_id}) "
+                            "is not available in the registry."
+                        )
+                    continue
+                reference_paths[ref.role] = str(host_path)
+                resolved_references.append(
+                    ExecutorReference(type="file", path=str(host_path), description=ref.role)
+                )
+
         if blockers:
             return InstantiateResult(card_id="", warnings=warnings, blockers=blockers)
 
@@ -974,7 +1164,9 @@ class CardLibraryService:
             skills=list(bp.skills),
             mcp_servers=list(bp.mcp_servers),
             instruction_blocks=instruction_blocks,
+            references=resolved_references,
             runtime_bindings=runtime_bindings,
+            template_metadata={"reference_paths": reference_paths},
         )
 
         # Create card

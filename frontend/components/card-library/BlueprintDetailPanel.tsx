@@ -1,6 +1,6 @@
 "use client";
 
-import { Wrench, Radio, Globe, AlertCircle, Calendar, Tag, Layers } from "lucide-react";
+import { Wrench, Radio, Globe, AlertCircle, Calendar, Tag, Layers, Database, Lightbulb } from "lucide-react";
 
 import { CardBlueprint, CardBlueprintIndexEntry, CardBlueprintDraftIndexEntry, BlueprintReviewResult } from "@/lib/types";
 import { formatDate } from "./BlueprintCard";
@@ -33,7 +33,7 @@ export function BlueprintDetailPanel({ blueprint, entry, review, actions, classN
   if (!blueprint) {
     return (
       <div className={`playing-card-detail empty ${className ?? ""}`.trim()}>
-        <p>选择一张牌查看详情</p>
+        <p>选择一张分析卡查看详情</p>
       </div>
     );
   }
@@ -44,6 +44,9 @@ export function BlueprintDetailPanel({ blueprint, entry, review, actions, classN
   const runtimeR = typeof blueprint.runtime_requirements.r === "object"
     ? blueprint.runtime_requirements.r.packages
     : [];
+
+  const referenceAssets = blueprint.reference_assets ?? [];
+  const useCases = blueprint.use_cases ?? [];
 
   const useCount = "use_count" in (entry ?? {}) ? (entry as CardBlueprintIndexEntry).use_count : 0;
 
@@ -71,7 +74,7 @@ export function BlueprintDetailPanel({ blueprint, entry, review, actions, classN
       </div>
 
       {/* Capabilities */}
-      {(blueprint.skills.length > 0 || blueprint.mcp_servers.length > 0 || runtimePython.length > 0 || runtimeR.length > 0) && (
+      {(blueprint.skills.length > 0 || blueprint.mcp_servers.length > 0 || runtimePython.length > 0 || runtimeR.length > 0 || referenceAssets.length > 0) && (
         <Section title="能力 & 依赖" icon={<Layers size={11} />}>
           <div className="playing-card-detail-chips">
             {blueprint.skills.map((s) => (
@@ -94,7 +97,27 @@ export function BlueprintDetailPanel({ blueprint, entry, review, actions, classN
                 R · {runtimeR.length}
               </span>
             )}
+            {referenceAssets.map((ref) => (
+              <span
+                key={ref.ref_id}
+                className="capability-chip runtime"
+                title={ref.description ?? ref.ref_id}
+              >
+                <Database size={10} /> {ref.role}{ref.required ? " *" : ""}
+              </span>
+            ))}
           </div>
+        </Section>
+      )}
+
+      {/* Use cases (authored by the generalization agent; drives manager retrieval) */}
+      {useCases.length > 0 && (
+        <Section title="使用场景" icon={<Lightbulb size={11} />}>
+          <ul className="playing-card-detail-instructions">
+            {useCases.map((useCase, i) => (
+              <li key={i}>{useCase}</li>
+            ))}
+          </ul>
         </Section>
       )}
 

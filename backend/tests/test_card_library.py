@@ -33,13 +33,17 @@ from app.models.card_blueprint import (
     CardBlueprintDraft,
     CardBlueprintIndexEntry,
     InstantiateRequest,
+    ReferenceAssetRef,
 )
 from app.models.cards import Card, CardAssetRef
 from app.models.executor import ExecutorContext, RuntimeBindings
 from app.models.graph import Asset
 from app.models.output_contracts import CardOutputSpec
+from app.services.card_desensitization_service import GeneralizedBlueprint
 from app.services.card_library_service import CardLibraryService
 from app.services.project_service import ProjectService
+from app.services.reference_data_service import ReferenceDataService
+from app.services.utils import atomic_write_json
 
 
 class _Base(unittest.TestCase):
@@ -90,6 +94,29 @@ class _Base(unittest.TestCase):
             current_goal="testing",
         )
         return ps
+
+    def _create_card_with_runtime(self, project_id: str, card_id: str, title: str):
+        ps = self._project_service()
+        store = ps.graph_store(project_id)
+        card = Card(
+            card_id=card_id,
+            card_type="module",
+            title=title,
+            status="proposed",
+            summary="A reusable analysis card",
+            outputs=[
+                CardOutputSpec(role="result", label="Result", artifact_class="figure"),
+            ],
+            executor_context=ExecutorContext(
+                instruction_blocks=["Run analysis"],
+                runtime_bindings=RuntimeBindings(
+                    conda_env="scanpy",
+                    r_env="__system__",
+                ),
+            ),
+        )
+        store.save_cards([card])
+        return card
 
 
 # ======================================================================
@@ -217,6 +244,25 @@ class TestBlueprintCRUD(_Base):
         result = svc.save_from_import({"blueprint_id": "x", "title": "BP", "summary": "test"})
         exported = svc.export_blueprint(result.blueprint_id)
         self.assertEqual(exported["title"], "BP")
+
+    def test_get_blueprint_fills_defaults_for_old_json(self):
+        """Old v1 blueprints missing reference_assets/use_cases get default empty lists."""
+        svc = self._service()
+        result = svc.save_from_import({"blueprint_id": "x", "title": "BP"})
+        bp_path = svc._blueprint_dir(result.blueprint_id) / "blueprint.json"
+        old_data = {
+            "blueprint_id": result.blueprint_id,
+            "title": "BP",
+            "summary": "",
+            # Deliberately omit reference_assets and use_cases
+        }
+        atomic_write_json(bp_path, old_data)
+
+        bp = svc.get_blueprint(result.blueprint_id)
+        self.assertIn("reference_assets", bp)
+        self.assertIn("use_cases", bp)
+        self.assertEqual(bp["reference_assets"], [])
+        self.assertEqual(bp["use_cases"], [])
 
 
 # ======================================================================
@@ -627,29 +673,6 @@ class TestArtifactClassValidation(unittest.TestCase):
 # ======================================================================
 
 class TestProjectDraftFlow(_Base):
-    def _create_card_with_runtime(self, project_id: str, card_id: str, title: str):
-        ps = self._project_service()
-        store = ps.graph_store(project_id)
-        card = Card(
-            card_id=card_id,
-            card_type="module",
-            title=title,
-            status="proposed",
-            summary="A reusable analysis card",
-            outputs=[
-                CardOutputSpec(role="result", label="Result", artifact_class="figure"),
-            ],
-            executor_context=ExecutorContext(
-                instruction_blocks=["Run analysis"],
-                runtime_bindings=RuntimeBindings(
-                    conda_env="scanpy",
-                    r_env="__system__",
-                ),
-            ),
-        )
-        store.save_cards([card])
-        return card
-
     def test_create_project_draft(self):
         ps = self._create_project("proj-draft")
         svc = self._service(ps)
@@ -673,6 +696,33 @@ class TestProjectDraftFlow(_Base):
         self.assertEqual(draft["draft_id"], created.draft_id)
         self.assertEqual(draft["status"], "draft")
         self.assertEqual(draft["blueprint"]["title"], "Clean Card")
+
+    def test_get_project_draft_fills_defaults_for_old_json(self):
+        """Old drafts missing reference_assets/use_cases get default empty lists."""
+        ps = self._create_project("proj-draft")
+        svc = self._service(ps)
+        self._create_card_with_runtime("proj-draft", "card-001", "Clean Card")
+
+        created = svc.create_project_draft("proj-draft", "card-001")
+        draft_dir = ps.project_path("proj-draft") / "card-library-drafts" / "drafts" / created.draft_id
+        old_data = {
+            "draft_id": created.draft_id,
+            "project_id": "proj-draft",
+            "status": "draft",
+            "blueprint": {
+                "blueprint_id": "bp-old",
+                "title": "Clean Card",
+                "summary": "",
+                # Deliberately omit reference_assets and use_cases
+            },
+        }
+        atomic_write_json(draft_dir / "blueprint.json", old_data)
+
+        draft = svc.get_project_draft("proj-draft", created.draft_id)
+        self.assertIn("reference_assets", draft["blueprint"])
+        self.assertIn("use_cases", draft["blueprint"])
+        self.assertEqual(draft["blueprint"]["reference_assets"], [])
+        self.assertEqual(draft["blueprint"]["use_cases"], [])
 
     def test_list_project_drafts(self):
         ps = self._create_project("proj-draft")
@@ -861,6 +911,232 @@ class TestProjectDraftFlow(_Base):
         # Project draft should still be approved, not published.
         draft = svc.get_project_draft("proj-draft", created.draft_id)
         self.assertEqual(draft["status"], "approved")
+
+
+# ======================================================================
+# Review pipeline (generalize-first + lock boundary + fallback)
+# ======================================================================
+
+
+def _make_generalization_scrubbing_project_name(project_name: str) -> GeneralizedBlueprint:
+    """A successful generalization that scrubs the project name and keeps the
+    required input count (so the structural guard passes)."""
+    return GeneralizedBlueprint(
+        title="Generic count matrix QC",
+        summary="Quality control for a count matrix.",
+        tags=["qc"],
+        domain="scrna",
+        use_cases=["QC a raw count matrix."],
+        inputs_schema=[{"slot": "count_matrix", "label": "count matrix", "accepted_formats": ["csv"], "required": True}],
+        outputs_schema=[{"role": "qc_figure", "label": "QC figure", "artifact_class": "figure", "required": True}],
+        instruction_blocks=["Read the count matrix and plot QC."],
+        confidence="high",
+    )
+
+
+class TestReviewPipeline(_Base):
+    def _card_with_project_name(self, project_service, project_id="proj-rev"):
+        store = project_service.graph_store(project_id)
+        card = Card(
+            card_id="card-rev",
+            card_type="module",
+            title="Test Project count matrix QC",
+            status="proposed",
+            summary="analysis at /home/user/oaa",
+            inputs=[CardAssetRef(label="count matrix txt", asset_id=None)],
+            outputs=[CardOutputSpec(role="qc_figure", label="QC figure", artifact_class="figure")],
+            executor_context=ExecutorContext(runtime_bindings=RuntimeBindings(conda_env="scanpy-env")),
+        )
+        store.save_cards([card])
+        return card
+
+    def test_review_without_generalization_falls_back_to_rule(self):
+        # No manager key => generalize() returns None => rule-only on the original
+        # blueprint. Title still contains the project name => rule review fails.
+        ps = self._create_project("proj-rev")
+        svc = self._service(ps)
+        self._card_with_project_name(ps)
+        created = svc.create_project_draft("proj-rev", "card-rev")
+
+        result = svc.review_project_draft("proj-rev", created.draft_id)
+        self.assertEqual(result["status"], "rejected")
+        fields = [i.get("field") for i in result["review"]["issues"]]
+        self.assertIn("generalization", fields)  # fallback info issue present
+
+    def test_review_generalizes_first_then_approves(self):
+        ps = self._create_project("proj-rev")
+        svc = self._service(ps)
+        self._card_with_project_name(ps)
+        created = svc.create_project_draft("proj-rev", "card-rev")
+
+        with patch(
+            "app.services.card_library_service.CardDesensitizationService.generalize",
+            return_value=_make_generalization_scrubbing_project_name("Test Project"),
+        ):
+            result = svc.review_project_draft("proj-rev", created.draft_id)
+        # Generalized candidate has no project name => rule review passes => approved.
+        self.assertEqual(result["status"], "approved")
+        # Blueprint on disk is the generalized one.
+        draft = svc.get_project_draft("proj-rev", created.draft_id)
+        self.assertEqual(draft["blueprint"]["title"], "Generic count matrix QC")
+        self.assertTrue(draft["blueprint"]["use_cases"])
+
+    def test_review_rejects_concurrent_modification(self):
+        ps = self._create_project("proj-rev")
+        svc = self._service(ps)
+        self._card_with_project_name(ps)
+        created = svc.create_project_draft("proj-rev", "card-rev")
+
+        from fastapi import HTTPException
+
+        def side_effect(blueprint, project_name=""):
+            # Simulate a concurrent edit during the outside-lock window.
+            draft_dir = svc._project_draft_dir("proj-rev", created.draft_id)
+            data = svc.get_project_draft("proj-rev", created.draft_id)
+            from app.models.card_blueprint import CardBlueprintDraft
+            d = CardBlueprintDraft.model_validate(data)
+            d.updated_at = "2030-01-01T00:00:00Z"
+            from app.services.utils import atomic_write_json
+            atomic_write_json(draft_dir / "blueprint.json", d.model_dump())
+            return None
+
+        with patch(
+            "app.services.card_library_service.CardDesensitizationService.generalize",
+            side_effect=side_effect,
+        ):
+            with self.assertRaises(HTTPException) as ctx:
+                svc.review_project_draft("proj-rev", created.draft_id)
+        self.assertEqual(ctx.exception.status_code, 409)
+
+    def test_review_guard_blocks_dropped_required_inputs(self):
+        ps = self._create_project("proj-rev")
+        svc = self._service(ps)
+        self._card_with_project_name(ps)
+        created = svc.create_project_draft("proj-rev", "card-rev")
+
+        # Generalization that DROPS the required input => structural guard keeps
+        # the original blueprint (which still has the project name => rejected).
+        dropped = GeneralizedBlueprint(
+            title="Generic",
+            summary="x",
+            inputs_schema=[],  # dropped the required input
+            outputs_schema=[],
+            instruction_blocks=[],
+            confidence="high",
+        )
+        with patch(
+            "app.services.card_library_service.CardDesensitizationService.generalize",
+            return_value=dropped,
+        ):
+            result = svc.review_project_draft("proj-rev", created.draft_id)
+        self.assertEqual(result["status"], "rejected")
+        draft = svc.get_project_draft("proj-rev", created.draft_id)
+        # Original title retained (not overwritten by the guard-failing gen).
+        self.assertEqual(draft["blueprint"]["title"], "Test Project count matrix QC")
+
+
+# ======================================================================
+# Reference-data dependencies at instantiation
+# ======================================================================
+
+
+class TestInstantiateReferenceAssets(_Base):
+    def _blueprint_with_reference(self, svc: CardLibraryService, ref_id: str) -> str:
+        bp = {
+            "blueprint_id": "bp-ref",
+            "title": "Annotate",
+            "summary": "annotate counts",
+            "inputs_schema": [{"slot": "counts", "label": "counts", "accepted_formats": ["csv"], "required": True}],
+            "outputs_schema": [{"role": "annotated", "label": "annotated", "artifact_class": "table", "required": True}],
+            "reference_assets": [{"ref_id": ref_id, "role": "gene_annotation", "required": True}],
+        }
+        result = svc.save_from_import(bp)
+        return result.blueprint_id
+
+    def test_instantiate_resolves_reference_paths(self):
+        ps = self._create_project("proj-ref")
+        svc = self._service(ps)
+
+        ref_src = self.data_root / "genes.gtf"
+        ref_src.write_bytes(b"geneA\n")
+        ref_meta = ReferenceDataService(settings=self.settings).register_local(ref_src, name="genes", kind="gtf")
+
+        blueprint_id = self._blueprint_with_reference(svc, ref_meta.ref_id)
+        self._add_asset("proj-ref", "sha256:" + "c" * 64, path="results/counts.csv")
+
+        result = svc.instantiate(
+            blueprint_id,
+            "proj-ref",
+            InstantiateRequest(input_bindings={"counts": "sha256:" + "c" * 64}),
+        )
+        self.assertEqual(result.blockers, [])
+        self.assertTrue(result.card_id)
+
+        store = ps.graph_store("proj-ref")
+        card = next(c for c in store.load_cards() if c.card_id == result.card_id)
+        ref_paths = [r.path for r in card.executor_context.references]
+        self.assertTrue(any("genes.gtf" in p for p in ref_paths), ref_paths)
+        self.assertEqual(
+            card.executor_context.template_metadata.get("reference_paths"),
+            {"gene_annotation": ref_paths[0]},
+        )
+
+    def test_instantiate_blocks_missing_required_reference(self):
+        ps = self._create_project("proj-ref")
+        svc = self._service(ps)
+        blueprint_id = self._blueprint_with_reference(svc, "ref_doesnotexist")
+        self._add_asset("proj-ref", "sha256:" + "d" * 64, path="results/counts.csv")
+
+        result = svc.instantiate(
+            blueprint_id,
+            "proj-ref",
+            InstantiateRequest(input_bindings={"counts": "sha256:" + "d" * 64}),
+        )
+        self.assertTrue(any("gene_annotation" in b for b in result.blockers), result.blockers)
+        self.assertEqual(result.card_id, "")
+
+
+# ======================================================================
+# Reference-data usage scanning
+# ======================================================================
+
+
+class TestReferenceUsage(_Base):
+    def test_reference_usage_scans_global_blueprints_and_project_drafts(self):
+        ps = self._create_project("proj-usage")
+        svc = self._service(ps)
+
+        ref_src = self.data_root / "genes.gtf"
+        ref_src.write_bytes(b"geneA\n")
+        ref_meta = ReferenceDataService(settings=self.settings).register_local(ref_src, name="genes", kind="gtf")
+
+        # Global blueprint with the reference
+        svc.save_from_import({
+            "blueprint_id": "bp-used",
+            "title": "Used BP",
+            "reference_assets": [{"ref_id": ref_meta.ref_id, "role": "gene_annotation", "required": True}],
+        })
+
+        # Project draft with the reference
+        self._create_card_with_runtime("proj-usage", "card-001", "Draft Card")
+        created = svc.create_project_draft("proj-usage", "card-001")
+        draft = svc.get_project_draft("proj-usage", created.draft_id)
+        draft["blueprint"]["reference_assets"] = [
+            {"ref_id": ref_meta.ref_id, "role": "gene_annotation", "required": True}
+        ]
+        from app.services.utils import atomic_write_json
+        draft_dir = ps.project_path("proj-usage") / "card-library-drafts" / "drafts" / created.draft_id
+        atomic_write_json(draft_dir / "blueprint.json", draft)
+
+        usages = svc.reference_usage(ref_meta.ref_id)
+        self.assertEqual(len(usages), 2)
+        types = {u["type"] for u in usages}
+        self.assertEqual(types, {"blueprint", "draft"})
+
+    def test_reference_usage_empty_when_unused(self):
+        svc = self._service()
+        svc.save_from_import({"blueprint_id": "bp-unused", "title": "Unused BP"})
+        self.assertEqual(svc.reference_usage("ref_doesnotexist"), [])
 
 
 if __name__ == "__main__":
