@@ -161,6 +161,10 @@ class CommandTemplateWorkerAdapter(WorkerAdapter):
             "BLUEPRINT_DEPENDENCY_REPORT_TOOL": str(contract_paths["dependency_report_tool_path"]),
             "BLUEPRINT_ALLOWED_PATHS": json.dumps(packet.allowed_paths),
             "BLUEPRINT_READONLY_PATHS": json.dumps(packet.readonly_paths),
+            "BLUEPRINT_REFERENCE_PATHS": json.dumps(
+                packet.executor_context.template_metadata.get("reference_paths", {})
+                if packet.executor_context else {}
+            ),
             "BLUEPRINT_FORBIDDEN_PATHS": json.dumps(packet.forbidden_paths),
             "BLUEPRINT_WORKER_TYPE": self.name,
             "BLUEPRINT_EXECUTOR_PROFILE": (
