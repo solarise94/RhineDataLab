@@ -186,14 +186,14 @@ export function ModuleCard({
       {
         onSuccess: (result) => {
           const msg = result.warnings.length
-            ? `已加入项目牌库（${result.warnings.length} 条警告）`
-            : "已加入项目牌库";
+            ? `已加入分析卡草稿（${result.warnings.length} 条警告）`
+            : "已加入分析卡草稿";
           setSaveToast(msg);
           setTimeout(() => setSaveToast(null), 2000);
           router.push(`/projects/${projectId}/card-library?draft=${result.draft_id}`);
         },
         onError: () => {
-          setSaveToast("加入项目牌库失败");
+          setSaveToast("加入分析卡草稿失败");
           setTimeout(() => setSaveToast(null), 3000);
         },
       },
@@ -297,10 +297,10 @@ export function ModuleCard({
                     style={{ fontSize: 10, padding: "4px 8px", flex: 1 }}
                     onClick={handleSaveToLibrary}
                     disabled={saveMutation.isPending}
-                    title="加入项目牌库"
+                    title="加入分析卡草稿"
                   >
                     {saveMutation.isPending ? <Loader2 size={12} className="spin" /> : <Bookmark size={12} />}
-                    加入项目牌库
+                    加入分析卡草稿
                   </button>
                 </div>
 
