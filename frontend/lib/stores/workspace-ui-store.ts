@@ -12,7 +12,7 @@ export const EMPTY_CARD_PAGE_BY_ID: Record<string, CardPage> = {};
 export const EMPTY_ATTACHMENTS: Attachment[] = [];
 export const EMPTY_SELECTED_WORKER_BY_CARD: Record<string, string | undefined> = {};
 export const EMPTY_SELECTED_PROFILE_BY_CARD: Record<string, string | undefined> = {};
-export const EMPTY_SELECTED_RUNTIME_BY_CARD: Record<string, string | undefined> = {};
+export const EMPTY_PENDING_RUN_RUNTIME_BY_CARD: Record<string, string | undefined> = {};
 
 type ArtifactPreviewStoreState = {
   open: boolean;
@@ -48,9 +48,9 @@ interface WorkspaceUiState {
   selectedWorkerByProject: Record<string, Record<string, string | undefined>>;
   selectedProfileByProject: Record<string, Record<string, string | undefined>>;
   globalPythonRuntimeByProject: Record<string, string | undefined>;
-  selectedPythonRuntimeByProject: Record<string, Record<string, string | undefined>>;
+  pendingRunPythonRuntimeByProject: Record<string, Record<string, string | undefined>>;
   globalRRuntimeByProject: Record<string, string | undefined>;
-  selectedRRuntimeByProject: Record<string, Record<string, string | undefined>>;
+  pendingRunRRuntimeByProject: Record<string, Record<string, string | undefined>>;
   scriptPreferenceByProject: Record<string, ScriptPreference | undefined>;
   noticesByProject: Record<string, string | null>;
   expandedCardByProject: Record<string, string | undefined>;
@@ -65,9 +65,9 @@ interface WorkspaceUiState {
   setSelectedWorker: (projectId: string, cardId: string, workerType?: string) => void;
   setSelectedProfile: (projectId: string, cardId: string, profileId?: string) => void;
   setGlobalPythonRuntime: (projectId: string, runtime?: string) => void;
-  setSelectedPythonRuntime: (projectId: string, cardId: string, runtime?: string) => void;
+  setPendingRunPythonRuntime: (projectId: string, cardId: string, runtime?: string) => void;
   setGlobalRRuntime: (projectId: string, runtime?: string) => void;
-  setSelectedRRuntime: (projectId: string, cardId: string, runtime?: string) => void;
+  setPendingRunRRuntime: (projectId: string, cardId: string, runtime?: string) => void;
   setScriptPreference: (projectId: string, preference: ScriptPreference) => void;
   setNotice: (projectId: string, message: string | null) => void;
   setExpandedCard: (projectId: string, cardId?: string) => void;
@@ -97,9 +97,9 @@ export const useWorkspaceUiStore = create<WorkspaceUiState>()(
       selectedWorkerByProject: {},
       selectedProfileByProject: {},
       globalPythonRuntimeByProject: {},
-      selectedPythonRuntimeByProject: {},
+      pendingRunPythonRuntimeByProject: {},
       globalRRuntimeByProject: {},
-      selectedRRuntimeByProject: {},
+      pendingRunRRuntimeByProject: {},
       scriptPreferenceByProject: {},
       noticesByProject: {},
       expandedCardByProject: {},
@@ -174,14 +174,14 @@ export const useWorkspaceUiStore = create<WorkspaceUiState>()(
             },
           };
         }),
-      setSelectedPythonRuntime: (projectId, cardId, runtime) =>
+      setPendingRunPythonRuntime: (projectId, cardId, runtime) =>
         set((state) => {
-          if (state.selectedPythonRuntimeByProject?.[projectId]?.[cardId] === runtime) return state;
+          if (state.pendingRunPythonRuntimeByProject?.[projectId]?.[cardId] === runtime) return state;
           return {
-            selectedPythonRuntimeByProject: {
-              ...(state.selectedPythonRuntimeByProject ?? {}),
+            pendingRunPythonRuntimeByProject: {
+              ...(state.pendingRunPythonRuntimeByProject ?? {}),
               [projectId]: {
-                ...(state.selectedPythonRuntimeByProject?.[projectId] ?? {}),
+                ...(state.pendingRunPythonRuntimeByProject?.[projectId] ?? {}),
                 [cardId]: runtime,
               },
             },
@@ -197,14 +197,14 @@ export const useWorkspaceUiStore = create<WorkspaceUiState>()(
             },
           };
         }),
-      setSelectedRRuntime: (projectId, cardId, runtime) =>
+      setPendingRunRRuntime: (projectId, cardId, runtime) =>
         set((state) => {
-          if (state.selectedRRuntimeByProject?.[projectId]?.[cardId] === runtime) return state;
+          if (state.pendingRunRRuntimeByProject?.[projectId]?.[cardId] === runtime) return state;
           return {
-            selectedRRuntimeByProject: {
-              ...(state.selectedRRuntimeByProject ?? {}),
+            pendingRunRRuntimeByProject: {
+              ...(state.pendingRunRRuntimeByProject ?? {}),
               [projectId]: {
-                ...(state.selectedRRuntimeByProject?.[projectId] ?? {}),
+                ...(state.pendingRunRRuntimeByProject?.[projectId] ?? {}),
                 [cardId]: runtime,
               },
             },
@@ -424,9 +424,7 @@ export const useWorkspaceUiStore = create<WorkspaceUiState>()(
         selectedWorkerByProject: state.selectedWorkerByProject,
         selectedProfileByProject: state.selectedProfileByProject,
         globalPythonRuntimeByProject: state.globalPythonRuntimeByProject,
-        selectedPythonRuntimeByProject: state.selectedPythonRuntimeByProject,
         globalRRuntimeByProject: state.globalRRuntimeByProject,
-        selectedRRuntimeByProject: state.selectedRRuntimeByProject,
         scriptPreferenceByProject: state.scriptPreferenceByProject,
         expandedCardByProject: state.expandedCardByProject,
         cardPageByProject: state.cardPageByProject,

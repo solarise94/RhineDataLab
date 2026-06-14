@@ -2081,7 +2081,15 @@ class WorkerService:
         if "instruction_blocks" in override.model_fields_set:
             context.instruction_blocks = list(override.instruction_blocks)
         if "references" in override.model_fields_set:
-            context.references = [item.model_copy(deep=True) for item in override.references]
+            # Merge (append + dedup by path) so card-specific reference-data
+            # files augment rather than replace the default worker references.
+            existing_paths = {ref.path for ref in context.references}
+            merged = list(context.references)
+            for item in override.references:
+                if item.path not in existing_paths:
+                    merged.append(item.model_copy(deep=True))
+                    existing_paths.add(item.path)
+            context.references = merged
         if "tool_policy" in override.model_fields_set:
             policy_fields = override.tool_policy.model_fields_set
             if "network" in policy_fields and override.tool_policy.network in {"allow", "deny"}:
@@ -2115,7 +2123,9 @@ class WorkerService:
                 for item in override.script_asset_bindings
             ]
         if "template_metadata" in override.model_fields_set:
-            context.template_metadata = dict(override.template_metadata)
+            merged_meta = dict(context.template_metadata or {})
+            merged_meta.update(override.template_metadata)
+            context.template_metadata = merged_meta
         return context
 
     @staticmethod

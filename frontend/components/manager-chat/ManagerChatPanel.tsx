@@ -100,7 +100,7 @@ interface SlashCommandOption {
 
 const MANAGER_CONTEXT_WINDOW_TOKENS = 1_000_000;
 const CHARS_PER_TOKEN_ESTIMATE = 3.6;
-const PROJECT_MUTATION_TOOLS = /^(create_card|update_card|delete_card|configure_card_execution|start_card_run|rerun_card|review_card_run|stop_card_run|cleanup_run_history)$/;
+const PROJECT_MUTATION_TOOLS = /^(create_card|update_card|delete_card|configure_card_execution|start_card_run|rerun_card|review_card_run|stop_card_run|cleanup_run_history|import_card_package|instantiate_card_package)$/;
 const RUN_CONTROL_TOOLS = /^(start_card_run|rerun_card|review_card_run|stop_card_run|cleanup_run_history)$/;
 const SLASH_COMMANDS: SlashCommandOption[] = [
   { command: "/compact", label: "压缩当前会话上下文" },

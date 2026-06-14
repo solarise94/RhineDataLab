@@ -2785,6 +2785,122 @@ function createTools(request, runtimeConfig = resolveManagerConfig(request)) {
         return toolTextResult("get_mcp_library_item", payload);
       },
     },
+    {
+      name: "search_card_packages",
+      label: "Search card packages",
+      description:
+        "Search the portable card package registry. Returns id/name/summary/tags/compatibility matches. " +
+        "Use this first to discover packages before calling get_card_package_detail.",
+      parameters: Type.Object({
+        query: Type.Optional(Type.String()),
+        runtime: Type.Optional(Type.String()),
+        tags: Type.Optional(Type.Array(Type.String())),
+        top_k: Type.Optional(Type.Number()),
+      }),
+      execute: async (toolCallId, params, signal) => {
+        const payload = await callLoggedTool(
+          "search_card_packages",
+          toolCallId,
+          projectId,
+          baseUrl,
+          token,
+          `/internal/manager-tools/projects/${projectId}/packages/search`,
+          { q: params.query, runtime: params.runtime, tags: params.tags, top_k: params.top_k },
+          signal,
+          sessionId,
+        );
+        return toolTextResult("search_card_packages", payload);
+      },
+    },
+    {
+      name: "get_card_package_detail",
+      label: "Get card package detail",
+      description:
+        "Read one portable card package with full manifest and bundle file listing. " +
+        "Use this after search_card_packages when a package id is ambiguous or you need to confirm compatibility before import.",
+      parameters: Type.Object({
+        package_id: Type.String(),
+        version: Type.Optional(Type.String()),
+      }),
+      execute: async (toolCallId, params, signal) => {
+        let path = `/internal/manager-tools/projects/${projectId}/packages/${encodeURIComponent(params.package_id)}`;
+        if (params.version) path += `?version=${encodeURIComponent(params.version)}`;
+        const payload = await callLoggedTool(
+          "get_card_package_detail",
+          toolCallId,
+          projectId,
+          baseUrl,
+          token,
+          path,
+          {},
+          signal,
+          sessionId,
+        );
+        return toolTextResult("get_card_package_detail", payload);
+      },
+    },
+    {
+      name: "import_card_package",
+      label: "Import card package",
+      description:
+        "Import a portable card package from a local directory or zip archive path on the server. " +
+        "This is a mutation — it stores the package in the local registry. " +
+        "Call this only after the package has been reviewed (via search/detail).",
+      parameters: Type.Object({
+        source_path: Type.String(),
+        overwrite: Type.Optional(Type.Boolean()),
+      }),
+      execute: async (toolCallId, params, signal) => {
+        const payload = await callLoggedTool(
+          "import_card_package",
+          toolCallId,
+          projectId,
+          baseUrl,
+          token,
+          `/internal/manager-tools/projects/${projectId}/packages/import`,
+          { source_path: params.source_path, overwrite: params.overwrite },
+          signal,
+          sessionId,
+        );
+        return toolTextResult("import_card_package", payload);
+      },
+    },
+    {
+      name: "instantiate_card_package",
+      label: "Instantiate card package",
+      description:
+        "Create a card from an imported package. Requires package_id. " +
+        "Optionally bind input assets, set parameter overrides, or pin a runtime override. " +
+        "This is a mutation — it creates a new card in the project. " +
+        "Always search/detail first, then instantiate with explicit bindings.",
+      parameters: Type.Object({
+        package_id: Type.String(),
+        version: Type.Optional(Type.String()),
+        input_bindings: Type.Optional(Type.Record(Type.String(), Type.String())),
+        parameter_bindings: Type.Optional(Type.Record(Type.String(), Type.Unknown())),
+        runtime_override: Type.Optional(Type.Record(Type.String(), Type.String())),
+      }),
+      execute: async (toolCallId, params, signal) => {
+        const payload = await callLoggedTool(
+          "instantiate_card_package",
+          toolCallId,
+          projectId,
+          baseUrl,
+          token,
+          `/internal/manager-tools/projects/${projectId}/packages/${encodeURIComponent(params.package_id)}/instantiate`,
+          {
+            package_id: params.package_id,
+            version: params.version,
+            input_bindings: params.input_bindings,
+            parameter_bindings: params.parameter_bindings,
+            runtime_override: params.runtime_override,
+          },
+          signal,
+          sessionId,
+        );
+        return toolTextResult("instantiate_card_package", payload);
+      },
+    },
   ];
   const mutatingTools = new Set([
     "create_card",
@@ -2809,6 +2925,8 @@ function createTools(request, runtimeConfig = resolveManagerConfig(request)) {
     "cleanup_run_history",
     "save_card_template",
     "instantiate_card_template",
+    "import_card_package",
+    "instantiate_card_package",
     "write_project_memory",
   ]);
   let visibleTools = btwMode ? tools.filter((tool) => !mutatingTools.has(tool.name)) : tools;

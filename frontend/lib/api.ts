@@ -39,6 +39,20 @@ import {
   RuntimeApprovalDecision,
   WorkOrder,
   RuntimeDependencyResolverPlan,
+  CardLibraryListResponse,
+  CardLibrarySearchResponse,
+  CardBlueprintResponse,
+  CardBlueprint,
+  SaveToLibraryResponse,
+  InstantiateBlueprintResponse,
+  InstantiateBlueprintRequest,
+  ProjectDraftListResponse,
+  CreateProjectDraftResponse,
+  ProjectDraftResponse,
+  PublishDraftResponse,
+  BlueprintReviewResult,
+  DraftStatus,
+  UpdateProjectDraftRequest,
 } from "./types";
 import type { ChatTokenUsage } from "./types";
 
@@ -746,23 +760,82 @@ export const api = {
   getLibraryItem(kind: "skill" | "mcp", entryId: string) {
     return request<LibraryDetailResponse>(`/library/${kind === "skill" ? "skills" : "mcp"}/${encodeURIComponent(entryId)}`);
   },
-  refreshLibrary(kind: "skill" | "mcp", force = false) {
-    const suffix = force ? "?force=true" : "";
-    return request<LibraryListResponse>(`/library/${kind === "skill" ? "skills" : "mcp"}/refresh${suffix}`, {
-      method: "POST",
-    });
-  },
-  resummarizeLibraryItem(kind: "skill" | "mcp", entryId: string) {
-    return request<LibraryDetailResponse>(
-      `/library/${kind === "skill" ? "skills" : "mcp"}/${encodeURIComponent(entryId)}/resummarize`,
-      { method: "POST" },
-    );
-  },
   getSkillLibrary(projectId: string) {
     return request<LibraryListResponse>(`/projects/${projectId}/skill-library`);
   },
   getMcpLibrary(projectId: string) {
     return request<LibraryListResponse>(`/projects/${projectId}/mcp-library`);
+  },
+  installProjectCapability(
+    projectId: string,
+    payload: {
+      kind: "skill" | "mcp";
+      source_type: string;
+      source: string;
+      overwrite?: boolean;
+    },
+  ) {
+    return request<{
+      ok: boolean;
+      kind: string;
+      installed_id: string;
+      installed_name: string;
+      summary: string;
+      warnings: string[];
+    }>(`/projects/${projectId}/capabilities/install`, {
+      method: "POST",
+      body: JSON.stringify(payload),
+    });
+  },
+  async uploadProjectSkill(projectId: string, file: File, overwrite?: boolean) {
+    const formData = new FormData();
+    formData.append("file", file);
+    if (overwrite !== undefined) {
+      formData.append("overwrite", String(overwrite));
+    }
+    const response = await fetch(uploadUrl(`/projects/${projectId}/capabilities/skills/upload`), {
+      method: "POST",
+      body: formData,
+      cache: "no-store",
+    });
+    if (!response.ok) {
+      const text = await response.text();
+      throw new Error(text || `Upload failed: ${response.status}`);
+    }
+    return response.json() as Promise<{
+      ok: boolean;
+      kind: string;
+      installed_id: string;
+      installed_name: string;
+      summary: string;
+      warnings: string[];
+    }>;
+  },
+  registerProjectMcpServer(
+    projectId: string,
+    payload: {
+      id: string;
+      name: string;
+      transport: "stdio" | "http" | "sse";
+      command?: string;
+      args?: string[];
+      env?: Record<string, string>;
+      url?: string;
+      headers?: Record<string, string>;
+      overwrite?: boolean;
+    },
+  ) {
+    return request<{
+      ok: boolean;
+      kind: string;
+      installed_id: string;
+      installed_name: string;
+      summary: string;
+      warnings: string[];
+    }>(`/projects/${projectId}/capabilities/mcp/register`, {
+      method: "POST",
+      body: JSON.stringify(payload),
+    });
   },
   getResultAssetContentUrl(projectId: string, assetId: string) {
     return `${API_BASE}/projects/${projectId}/results/${assetId}/content`;
@@ -782,5 +855,97 @@ export const api = {
     base.pathname = `${base.pathname.replace(/\/$/, "")}/projects/${projectId}/runs/${runId}/ws`;
     base.search = "";
     return base.toString();
+  },
+
+  // -----------------------------------------------------------------------
+  // Card Library / Blueprint Deck
+  // -----------------------------------------------------------------------
+
+  getCardLibrary() {
+    return request<CardLibraryListResponse>("/card-library");
+  },
+  searchCardLibrary(params: { query?: string; tags?: string[]; domain?: string; runtime?: string; top_k?: number }) {
+    const sp = new URLSearchParams();
+    if (params.query) sp.set("query", params.query);
+    (params.tags ?? []).forEach((t) => sp.append("tags", t));
+    if (params.domain) sp.set("domain", params.domain);
+    if (params.runtime) sp.set("runtime", params.runtime);
+    if (params.top_k) sp.set("top_k", String(params.top_k));
+    return request<CardLibrarySearchResponse>(`/card-library/search?${sp.toString()}`);
+  },
+  getCardBlueprint(blueprintId: string) {
+    return request<CardBlueprintResponse>(`/card-library/${blueprintId}`);
+  },
+  saveCardToLibrary(projectId: string, cardId: string) {
+    return request<SaveToLibraryResponse>("/card-library", {
+      method: "POST",
+      body: JSON.stringify({ project_id: projectId, card_id: cardId }),
+    });
+  },
+  importCardBlueprint(blueprint: CardBlueprint) {
+    return request<SaveToLibraryResponse>("/card-library/import", {
+      method: "POST",
+      body: JSON.stringify(blueprint),
+    });
+  },
+  updateCardBlueprint(blueprintId: string, updates: { title?: string; summary?: string; tags?: string[]; domain?: string }) {
+    return request<CardBlueprintResponse>(`/card-library/${blueprintId}`, {
+      method: "PUT",
+      body: JSON.stringify(updates),
+    });
+  },
+  deleteCardBlueprint(blueprintId: string) {
+    return request<{ ok: boolean; blueprint_id: string }>(`/card-library/${blueprintId}`, {
+      method: "DELETE",
+    });
+  },
+  exportCardBlueprint(blueprintId: string) {
+    return request<CardBlueprintResponse>(`/card-library/${blueprintId}/export`);
+  },
+  instantiateCardBlueprint(projectId: string, blueprintId: string, payload: InstantiateBlueprintRequest) {
+    return request<InstantiateBlueprintResponse>(
+      `/projects/${projectId}/card-library/${blueprintId}/instantiate`,
+      { method: "POST", body: JSON.stringify(payload) },
+    );
+  },
+
+  // -----------------------------------------------------------------------
+  // Project Card Library / Blueprint Drafts
+  // -----------------------------------------------------------------------
+
+  getProjectCardLibrary(projectId: string) {
+    return request<ProjectDraftListResponse>(`/projects/${projectId}/card-library`);
+  },
+  addCardToProjectLibrary(projectId: string, cardId: string) {
+    return request<CreateProjectDraftResponse>(`/projects/${projectId}/card-library`, {
+      method: "POST",
+      body: JSON.stringify({ card_id: cardId }),
+    });
+  },
+  getProjectCardDraft(projectId: string, draftId: string) {
+    return request<ProjectDraftResponse>(`/projects/${projectId}/card-library/${draftId}`);
+  },
+  reviewProjectCardDraft(projectId: string, draftId: string) {
+    return request<{ draft_id: string; status: DraftStatus; review: BlueprintReviewResult }>(
+      `/projects/${projectId}/card-library/${draftId}/review`,
+      { method: "POST" },
+    );
+  },
+  publishProjectCardDraft(projectId: string, draftId: string) {
+    return request<PublishDraftResponse>(`/projects/${projectId}/card-library/${draftId}/publish`, {
+      method: "POST",
+    });
+  },
+  updateProjectCardDraft(projectId: string, draftId: string, payload: UpdateProjectDraftRequest) {
+    return request<ProjectDraftResponse>(`/projects/${projectId}/card-library/${draftId}`, {
+      method: "PUT",
+      body: JSON.stringify(payload),
+    });
+  },
+  deleteProjectCardDraft(projectId: string, draftId: string) {
+    return request<{ ok: boolean; draft_id: string }>(
+      `/projects/${projectId}/card-library/${draftId}`,
+      { method: "DELETE" },
+    );
   },
 };

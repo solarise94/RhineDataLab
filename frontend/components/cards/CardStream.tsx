@@ -29,8 +29,8 @@ export function CardStream({
   rRuntimes = [],
   globalPythonRuntime,
   globalRRuntime,
-  selectedPythonRuntimeByCard = {},
-  selectedRRuntimeByCard = {},
+  pendingRunPythonRuntimeByCard = {},
+  pendingRunRRuntimeByCard = {},
   onSelectPythonRuntime,
   onSelectRRuntime,
 }: {
@@ -56,8 +56,8 @@ export function CardStream({
   rRuntimes?: RRuntime[];
   globalPythonRuntime?: string;
   globalRRuntime?: string;
-  selectedPythonRuntimeByCard?: Record<string, string | undefined>;
-  selectedRRuntimeByCard?: Record<string, string | undefined>;
+  pendingRunPythonRuntimeByCard?: Record<string, string | undefined>;
+  pendingRunRRuntimeByCard?: Record<string, string | undefined>;
   onSelectPythonRuntime?: (card: Card, runtime?: string) => void;
   onSelectRRuntime?: (card: Card, runtime?: string) => void;
 }) {
@@ -243,8 +243,8 @@ export function CardStream({
                       rRuntimes={rRuntimes}
                       globalPythonRuntime={globalPythonRuntime}
                       globalRRuntime={globalRRuntime}
-                      selectedPythonRuntime={selectedPythonRuntimeByCard[card.card_id]}
-                      selectedRRuntime={selectedRRuntimeByCard[card.card_id]}
+                      selectedPythonRuntime={pendingRunPythonRuntimeByCard[card.card_id]}
+                      selectedRRuntime={pendingRunRRuntimeByCard[card.card_id]}
                       onSelectPythonRuntime={onSelectPythonRuntime}
                       onSelectRRuntime={onSelectRRuntime}
                     />

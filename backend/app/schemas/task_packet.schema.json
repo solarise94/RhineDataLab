@@ -423,6 +423,42 @@
           },
           "title": "Env",
           "type": "object"
+        },
+        "runtime_source": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Runtime Source"
+        },
+        "python_runtime_source": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Python Runtime Source"
+        },
+        "r_runtime_source": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "R Runtime Source"
         }
       },
       "title": "RuntimeBindings",

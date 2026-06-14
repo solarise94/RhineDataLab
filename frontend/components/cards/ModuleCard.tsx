@@ -1,6 +1,6 @@
 "use client";
 
-import { useMemo, useRef, useEffect } from "react";
+import { useMemo, useRef, useEffect, useState } from "react";
 import {
   CheckCircle2,
   Files,
@@ -11,6 +11,8 @@ import {
   Sparkles,
   Archive,
   TriangleAlert,
+  Bookmark,
+  Loader2,
 } from "lucide-react";
 import { Card, PythonRuntime, RRuntime, WorkerCapability, ExecutorProfile, WorkItem } from "@/lib/types";
 import { CardStatusBadge } from "./CardStatusBadge";
@@ -18,6 +20,8 @@ import { SpecialistAvatar } from "./SpecialistAvatar";
 import { FileBag } from "./FileBag";
 import { CardPage, EMPTY_CARD_PAGE_BY_ID, useWorkspaceUiStore } from "@/lib/stores/workspace-ui-store";
 import { latestManagerReview } from "@/lib/card-review";
+import { useAddCardToProjectLibrary } from "@/lib/hooks";
+import { useRouter } from "next/navigation";
 
 function preferredExecutorProfile(profiles: ExecutorProfile[], workerType?: string) {
   if (!workerType) return profiles[0];
@@ -83,6 +87,10 @@ export function ModuleCard({
   const fileCount = card.outputs.filter((o) => o.asset_id).length;
   const visibleManagerReview = latestManagerReview(card.manager_review);
 
+  const saveMutation = useAddCardToProjectLibrary();
+  const router = useRouter();
+  const [saveToast, setSaveToast] = useState<string | null>(null);
+
   const isGhost = card.status === "proposed";
   const isRunning = card.status === "running" || card.status === "reviewing";
   const isDormant = card.status === "cancelled" || card.status === "rejected";
@@ -99,6 +107,14 @@ export function ModuleCard({
     : null;
   const globalRuntimeLabel = globalPythonRuntime && globalPythonRuntime !== "__system__" ? globalPythonRuntime : "系统默认";
   const globalRRuntimeLabel = globalRRuntime && globalRRuntime !== "__system__" ? globalRRuntime : "系统默认";
+  const cardCtx = card.executor_context as Record<string, unknown> | null | undefined;
+  const cardBindings = cardCtx?.runtime_bindings as { conda_env?: string | null; r_env?: string | null } | undefined;
+  const effectivePythonLabel = cardBindings?.conda_env
+    ? `卡片固定: ${cardBindings.conda_env}`
+    : `项目默认: ${globalRuntimeLabel}`;
+  const effectiveRLabel = cardBindings?.r_env
+    ? `卡片固定: ${cardBindings.r_env}`
+    : `项目默认: ${globalRRuntimeLabel}`;
 
   const pages: CardPage[] = isDormant
     ? ["specialist", "result", "archive"]
@@ -160,6 +176,28 @@ export function ModuleCard({
   function sendToManager(text: string, e: React.MouseEvent) {
     e.stopPropagation();
     onAskManager?.(text);
+  }
+
+  function handleSaveToLibrary(e: React.MouseEvent) {
+    e.stopPropagation();
+    if (saveMutation.isPending) return;
+    saveMutation.mutate(
+      { projectId, cardId: card.card_id },
+      {
+        onSuccess: (result) => {
+          const msg = result.warnings.length
+            ? `已加入分析卡草稿（${result.warnings.length} 条警告）`
+            : "已加入分析卡草稿";
+          setSaveToast(msg);
+          setTimeout(() => setSaveToast(null), 2000);
+          router.push(`/projects/${projectId}/card-library?draft=${result.draft_id}`);
+        },
+        onError: () => {
+          setSaveToast("加入分析卡草稿失败");
+          setTimeout(() => setSaveToast(null), 3000);
+        },
+      },
+    );
   }
 
   return (
@@ -226,6 +264,18 @@ export function ModuleCard({
                   <div className="badge-stat"><span>📤</span> {card.outputs.length} outputs</div>
                 </div>
 
+                {saveToast && (
+                  <div
+                    style={{
+                      marginTop: 10,
+                      fontSize: 11,
+                      fontWeight: 500,
+                      color: saveToast.includes("失败") ? "var(--red)" : "var(--green)",
+                    }}
+                  >
+                    {saveToast}
+                  </div>
+                )}
                 <div className="inline-actions" style={{ marginTop: 12 }}>
                   {onAskManager && (
                     <button className="btn secondary" style={{ fontSize: 10, padding: "4px 8px", flex: 1 }} onClick={(e) => sendToManager(`请解释 ${card.title} 的运行情况和当前状态`, e)}>
@@ -242,6 +292,16 @@ export function ModuleCard({
                       <RotateCcw size={12} /> 恢复
                     </button>
                   ) : null}
+                  <button
+                    className="btn secondary"
+                    style={{ fontSize: 10, padding: "4px 8px", flex: 1 }}
+                    onClick={handleSaveToLibrary}
+                    disabled={saveMutation.isPending}
+                    title="加入分析卡草稿"
+                  >
+                    {saveMutation.isPending ? <Loader2 size={12} className="spin" /> : <Bookmark size={12} />}
+                    加入分析卡草稿
+                  </button>
                 </div>
 
                 {card.status === "planned" ? (
@@ -280,13 +340,14 @@ export function ModuleCard({
                       ) : null}
                     </label>
                     <label className="executor-select-label" onClick={(e) => e.stopPropagation()}>
-                      <span>Python runtime</span>
+                      <span>本次运行 Python</span>
+                      <span className="effective-runtime-hint">{effectivePythonLabel}</span>
                       <select
                         value={selectedPythonRuntime ?? "__global__"}
                         onChange={(e) => onSelectPythonRuntime?.(card, e.target.value === "__global__" ? undefined : e.target.value)}
                         disabled={readOnly || !pythonRuntimes.length}
                       >
-                        <option value="__global__">跟随全局 ({globalRuntimeLabel})</option>
+                        <option value="__global__">使用当前生效值</option>
                         {pythonRuntimes.map((item) => (
                           <option key={`${item.manager}:${item.name}`} value={item.name}>
                             {item.label}
@@ -295,13 +356,14 @@ export function ModuleCard({
                       </select>
                     </label>
                     <label className="executor-select-label" onClick={(e) => e.stopPropagation()}>
-                      <span>R runtime</span>
+                      <span>本次运行 R</span>
+                      <span className="effective-runtime-hint">{effectiveRLabel}</span>
                       <select
                         value={selectedRRuntime ?? "__global__"}
                         onChange={(e) => onSelectRRuntime?.(card, e.target.value === "__global__" ? undefined : e.target.value)}
                         disabled={readOnly || !rRuntimes.length}
                       >
-                        <option value="__global__">跟随全局 ({globalRRuntimeLabel})</option>
+                        <option value="__global__">使用当前生效值</option>
                         {rRuntimes.map((item) => (
                           <option key={`${item.manager}:${item.name}`} value={item.name}>
                             {item.label}

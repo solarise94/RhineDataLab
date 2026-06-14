@@ -12,6 +12,7 @@ class LibraryEntry(BaseModel):
     id: str
     kind: LibraryKind
     name: str
+    aliases: list[str] = Field(default_factory=list)
     summary_short: str
     summary_long: str = ""
     tags: list[str] = Field(default_factory=list)

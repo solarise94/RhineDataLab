@@ -175,8 +175,19 @@ async def run_events_ws(project_id: str, run_id: str, websocket: WebSocket) -> N
     store = get_project_service().graph_store(project_id)
     sent = 0
     disconnected = False
+
+    async def _watch_client() -> None:
+        """Drain incoming messages; exits when the client disconnects."""
+        nonlocal disconnected
+        try:
+            while True:
+                await websocket.receive()
+        except Exception:
+            disconnected = True
+
+    watcher = asyncio.ensure_future(_watch_client())
     try:
-        while True:
+        while not disconnected:
             events = store.load_run_events(run_id)
             while sent < len(events):
                 await websocket.send_json(events[sent].model_dump())
@@ -189,6 +200,11 @@ async def run_events_ws(project_id: str, run_id: str, websocket: WebSocket) -> N
     except WebSocketDisconnect:
         disconnected = True
     finally:
+        watcher.cancel()
+        try:
+            await watcher
+        except asyncio.CancelledError:
+            pass
         if not disconnected:
             try:
                 await websocket.close()

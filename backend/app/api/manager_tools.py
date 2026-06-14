@@ -529,6 +529,74 @@ def get_mcp_library_item(
         raise HTTPException(status_code=422, detail=str(exc)) from exc
 
 
+# ------------------------------------------------------------------
+# Portable Card Package endpoints
+# ------------------------------------------------------------------
+
+@router.post("/packages/search")
+def search_card_packages(
+    project_id: str,
+    payload: dict,
+    authorization: str | None = Header(default=None),
+    manager_service: ManagerService = Depends(get_manager_service),
+) -> dict:
+    _verify_internal_token(authorization)
+    try:
+        return manager_service.blueprint_tools.search_card_packages(project_id, payload)
+    except ManagerPlanningError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+
+
+@router.get("/packages/{package_id}")
+def get_card_package_detail(
+    project_id: str,
+    package_id: str,
+    version: str | None = None,
+    authorization: str | None = Header(default=None),
+    manager_service: ManagerService = Depends(get_manager_service),
+) -> dict:
+    _verify_internal_token(authorization)
+    try:
+        return manager_service.blueprint_tools.get_card_package_detail(project_id, package_id, version)
+    except ManagerPlanningError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+
+
+@router.post("/packages/import")
+def import_card_package(
+    project_id: str,
+    payload: dict,
+    authorization: str | None = Header(default=None),
+    x_blueprint_session_id: str | None = Header(default=None),
+    manager_service: ManagerService = Depends(get_manager_service),
+    manager_auto_service: ManagerAutoService = Depends(get_manager_auto_service),
+) -> dict:
+    _verify_internal_token(authorization)
+    _guard_mutation(project_id, "import_card_package", x_blueprint_session_id, manager_auto_service)
+    try:
+        return manager_service.blueprint_tools.import_card_package(project_id, payload)
+    except ManagerPlanningError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+
+
+@router.post("/packages/{package_id}/instantiate")
+def instantiate_card_package(
+    project_id: str,
+    package_id: str,
+    payload: dict,
+    authorization: str | None = Header(default=None),
+    x_blueprint_session_id: str | None = Header(default=None),
+    manager_service: ManagerService = Depends(get_manager_service),
+    manager_auto_service: ManagerAutoService = Depends(get_manager_auto_service),
+) -> dict:
+    _verify_internal_token(authorization)
+    _guard_mutation(project_id, "instantiate_card_package", x_blueprint_session_id, manager_auto_service)
+    try:
+        return manager_service.blueprint_tools.instantiate_card_package(project_id, payload)
+    except ManagerPlanningError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+
+
 @router.post("/runtime-dependencies/install")
 def install_runtime_dependencies(
     project_id: str,

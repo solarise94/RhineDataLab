@@ -9,9 +9,6 @@ import {
   useAppSettings,
   useExecutorProfiles,
   useExportDiagnosticsMutation,
-  useLibrary,
-  useRefreshLibraryMutation,
-  useResummarizeLibraryItemMutation,
   useSaveExecutorProfileMutation,
   useTestApiProviderMutation,
   useUpdateAppSettingsMutation,
@@ -93,92 +90,6 @@ function formatRuntimeLabel(runtime?: string | null) {
 
 function formatProtocolLabel(protocol: ApiProviderProtocol) {
   return protocol === "anthropic_compatible" ? "Anthropic" : "OpenAI";
-}
-
-function LibrarySection({
-  kind,
-  title,
-  description,
-}: {
-  kind: "skill" | "mcp";
-  title: string;
-  description: string;
-}) {
-  const libraryQuery = useLibrary(kind);
-  const refreshMutation = useRefreshLibraryMutation(kind);
-  const resummarizeMutation = useResummarizeLibraryItemMutation(kind);
-  const [selectedId, setSelectedId] = useState<string | null>(null);
-
-  const items = libraryQuery.data?.items ?? [];
-  const selected = items.find((item) => item.id === selectedId) ?? items[0] ?? null;
-
-  return (
-    <section className="settings-section">
-      <div className="settings-section-header">
-        <div>
-          <h3>{title}</h3>
-          <p>{description}</p>
-        </div>
-        <div className="settings-actions">
-          <button type="button" className="settings-button" onClick={() => refreshMutation.mutate({ force: false })}>
-            刷新注册
-          </button>
-          <button type="button" className="settings-button secondary" onClick={() => refreshMutation.mutate({ force: true })}>
-            强制重建
-          </button>
-        </div>
-      </div>
-      <div className="settings-library-grid">
-        <div className="settings-library-list">
-          {libraryQuery.isLoading ? <div className="settings-empty">加载中…</div> : null}
-          {!libraryQuery.isLoading && !items.length ? <div className="settings-empty">暂无条目</div> : null}
-          {items.map((item) => (
-            <button
-              key={item.id}
-              type="button"
-              className={`settings-library-item ${selected?.id === item.id ? "active" : ""}`}
-              onClick={() => setSelectedId(item.id)}
-            >
-              <strong>{item.name}</strong>
-              <span>{item.id}</span>
-              {item.tags?.length ? <em>{item.tags.join(" · ")}</em> : null}
-            </button>
-          ))}
-        </div>
-        <div className="settings-library-detail">
-          {selected ? (
-            <>
-              <div className="settings-detail-header">
-                <div>
-                  <h4>{selected.name}</h4>
-                  <p>{selected.summary_long ?? selected.summary}</p>
-                </div>
-                <button
-                  type="button"
-                  className="settings-button"
-                  onClick={() => resummarizeMutation.mutate(selected.id)}
-                  disabled={resummarizeMutation.isPending}
-                >
-                  重新摘要
-                </button>
-              </div>
-              <div className="settings-kv-list">
-                <div><strong>ID</strong><span>{selected.id}</span></div>
-                <div><strong>启用</strong><span>{selected.enabled ? "是" : "否"}</span></div>
-                <div><strong>标签</strong><span>{selected.tags?.join(", ") || "—"}</span></div>
-                <div><strong>使用场景</strong><span>{selected.use_cases?.join(", ") || "—"}</span></div>
-                <div><strong>运行时要求</strong><span>{selected.runtime_requirements?.join(", ") || selected.supported_runtimes?.join(", ") || "—"}</span></div>
-                <div><strong>启动提示</strong><span>{selected.launch_hint || "—"}</span></div>
-                <div><strong>来源</strong><span>{selected.source_path ?? selected.source ?? "—"}</span></div>
-              </div>
-            </>
-          ) : (
-            <div className="settings-empty">选择一个条目查看详情</div>
-          )}
-        </div>
-      </div>
-    </section>
-  );
 }
 
 function ExecutorAuthModeSelector({ workerType }: { workerType: string }) {
@@ -553,7 +464,6 @@ export function SettingsPanels({
   const [scriptPreference, setScriptPreference] = useState<ScriptPreference>(project.runtime_preferences.script_preference);
   const [pythonRuntime, setPythonRuntime] = useState(formatRuntimeLabel(project.runtime_preferences.python_runtime));
   const [rRuntime, setRRuntime] = useState(formatRuntimeLabel(project.runtime_preferences.r_runtime));
-  const [executionMode, setExecutionMode] = useState<"guarded" | "workspace_write">(project.runtime_preferences.execution_mode ?? "guarded");
   const [diagnosticInfo, setDiagnosticInfo] = useState<DiagnosticExportResponse | null>(null);
 
   const runtimeSummary = useMemo(() => {
@@ -565,9 +475,8 @@ export function SettingsPanels({
           : scriptPreference === "prefer_mixed"
             ? "按任务选择"
             : "让 Manager 询问";
-    const mode = executionMode === "workspace_write" ? "Workspace Write" : "Guarded";
-    return `${script} · Python ${pythonRuntime} · R ${rRuntime} · ${mode}`;
-  }, [pythonRuntime, rRuntime, scriptPreference, executionMode]);
+    return `${script} · Python ${pythonRuntime} · R ${rRuntime}`;
+  }, [pythonRuntime, rRuntime, scriptPreference]);
 
   useEffect(() => {
     if (!appSettingsQuery.data) return;
@@ -652,7 +561,6 @@ export function SettingsPanels({
         script_preference: scriptPreference,
         python_runtime: pythonRuntime === "__system__" ? null : pythonRuntime,
         r_runtime: rRuntime === "__system__" ? null : rRuntime,
-        execution_mode: executionMode,
       });
       setStatus("项目运行时偏好已保存。");
     } catch (error) {
@@ -849,14 +757,14 @@ export function SettingsPanels({
       <section className="settings-section">
         <div className="settings-section-header">
           <div>
-            <h3>运行时偏好</h3>
-            <p>项目级持久化运行时偏好。Manager 和 card 执行共用这套设置。侧边栏可快速切换 Python / R Runtime；此处保留完整运行时设置。</p>
+            <h3>项目默认运行时</h3>
+            <p>新建 card 和未固定 card 将默认使用这里的设置。侧边栏可快速切换；此处可同时修改三项并保存。</p>
           </div>
           <div className="settings-inline-note">{runtimeSummary}</div>
         </div>
         <div className="settings-form-grid">
           <label className="settings-field">
-            <span>脚本偏好</span>
+            <span>执行脚本偏好</span>
             <select value={scriptPreference} onChange={(event) => setScriptPreference(event.target.value as ScriptPreference)}>
               <option value="auto">让 Manager 询问</option>
               <option value="prefer_python">偏好 Python</option>
@@ -865,7 +773,7 @@ export function SettingsPanels({
             </select>
           </label>
           <label className="settings-field">
-            <span>Python 运行时</span>
+            <span>项目默认 Python</span>
             <select value={pythonRuntime} onChange={(event) => setPythonRuntime(event.target.value)} disabled={readOnly}>
               {pythonRuntimes.map((item) => (
                 <option key={`${item.manager}:${item.name}`} value={item.name}>
@@ -875,7 +783,7 @@ export function SettingsPanels({
             </select>
           </label>
           <label className="settings-field">
-            <span>R 运行时</span>
+            <span>项目默认 R</span>
             <select value={rRuntime} onChange={(event) => setRRuntime(event.target.value)} disabled={readOnly}>
               {rRuntimes.map((item) => (
                 <option key={`${item.manager}:${item.name}`} value={item.name}>
@@ -884,17 +792,10 @@ export function SettingsPanels({
               ))}
             </select>
           </label>
-          <label className="settings-field">
-            <span>执行模式</span>
-            <select value={executionMode} onChange={(event) => setExecutionMode(event.target.value as "guarded" | "workspace_write")} disabled={readOnly}>
-              <option value="guarded">Guarded（每 run 独立目录）</option>
-              <option value="workspace_write">Workspace Write（cwd 在 work/）</option>
-            </select>
-          </label>
         </div>
         <div className="settings-actions">
           <button type="button" className="settings-button" disabled={readOnly} onClick={saveRuntimeSettings}>
-            保存运行时偏好
+            保存项目默认设置
           </button>
         </div>
       </section>
@@ -1314,16 +1215,6 @@ export function SettingsPanels({
         ) : null}
       </section>
 
-      <LibrarySection
-        kind="skill"
-        title="技能库"
-        description="注册后的技能库。Manager 默认只读取 id 和名称，再把选中的 id 挂到 card 执行配置。"
-      />
-      <LibrarySection
-        kind="mcp"
-        title="MCP 能力库"
-        description="注册后的 MCP 能力库。Manager 默认只读取 id 和名称，再由 wrapper 在 run 启动时生成 run-local MCP 配置。"
-      />
     </div>
   );
 }

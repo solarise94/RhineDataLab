@@ -661,6 +661,7 @@ export interface UpdateProjectRuntimePreferencesPayload {
   script_preference?: "auto" | "prefer_python" | "prefer_r" | "prefer_mixed" | null;
   python_runtime?: string | null;
   r_runtime?: string | null;
+  /** @deprecated Internal only — no longer exposed in user-facing Settings UI. */
   execution_mode?: "guarded" | "workspace_write" | null;
 }
 
@@ -668,6 +669,7 @@ export interface ProjectRuntimePreferences {
   script_preference: "auto" | "prefer_python" | "prefer_r" | "prefer_mixed";
   python_runtime?: string | null;
   r_runtime?: string | null;
+  /** @deprecated Internal only — no longer exposed in user-facing Settings UI. */
   execution_mode?: "guarded" | "workspace_write";
 }
 
@@ -803,4 +805,193 @@ export interface ReportSection {
   summary: string;
   assets: Asset[];
   claims: Array<{ claim_id: string; text: string; status: string }>;
+}
+
+// ---------------------------------------------------------------------------
+// Card Library / Blueprint Deck
+// ---------------------------------------------------------------------------
+
+export interface BlueprintInputSchema {
+  slot: string;
+  label: string;
+  accepted_formats: string[];
+  required: boolean;
+  description?: string | null;
+}
+
+export interface BlueprintOutputSchema {
+  role: string;
+  label: string;
+  artifact_class: string;
+  accepted_formats: string[];
+  preferred_format?: string | null;
+  required: boolean;
+  description?: string | null;
+}
+
+export interface BlueprintParameter {
+  name: string;
+  type: string;
+  required: boolean;
+  default: unknown;
+  description?: string | null;
+}
+
+export interface BlueprintRuntimeRequirement {
+  env_hint: string;
+  packages: string[];
+}
+
+export interface BlueprintRuntimeRequirements {
+  python: BlueprintRuntimeRequirement | "__system__";
+  r: BlueprintRuntimeRequirement | "__system__";
+}
+
+export interface BlueprintProvenance {
+  source_card_id: string | null;
+  source_project_id: string | null;
+  created_at: string | null;
+  created_by: string;
+  last_used_at: string | null;
+  use_count: number;
+}
+
+export interface CardBlueprint {
+  blueprint_id: string;
+  version: string;
+  schema_version: string;
+  title: string;
+  summary: string;
+  tags: string[];
+  domain: string;
+  cover_art: string | null;
+  skills: string[];
+  mcp_servers: string[];
+  runtime_requirements: BlueprintRuntimeRequirements;
+  inputs_schema: BlueprintInputSchema[];
+  outputs_schema: BlueprintOutputSchema[];
+  parameters: BlueprintParameter[];
+  instruction_blocks: string[];
+  provenance: BlueprintProvenance;
+}
+
+export interface CardBlueprintIndexEntry {
+  blueprint_id: string;
+  title: string;
+  summary: string;
+  tags: string[];
+  domain: string;
+  skills: string[];
+  mcp_servers: string[];
+  runtime_hints: string[];
+  use_count: number;
+  last_used_at: string | null;
+  created_at: string | null;
+}
+
+export interface CardLibraryListResponse {
+  entries: CardBlueprintIndexEntry[];
+}
+
+export interface CardLibrarySearchResponse {
+  results: CardBlueprintIndexEntry[];
+}
+
+export interface CardBlueprintResponse {
+  blueprint: CardBlueprint;
+}
+
+export interface SaveToLibraryResponse {
+  blueprint_id: string;
+  warnings: string[];
+}
+
+export interface InstantiateBlueprintResponse {
+  card_id: string;
+  warnings: string[];
+  blockers: string[];
+}
+
+export interface InstantiateBlueprintRequest {
+  input_bindings: Record<string, string>;
+  python_runtime?: string | null;
+  r_runtime?: string | null;
+  parameter_values: Record<string, unknown>;
+}
+
+// ---------------------------------------------------------------------------
+// Project Card Library / Blueprint Drafts
+// ---------------------------------------------------------------------------
+
+export type DraftStatus =
+  | "draft"
+  | "needs_review"
+  | "approved"
+  | "rejected"
+  | "published";
+
+export interface BlueprintReviewIssue {
+  severity: "info" | "warning" | "error";
+  field: string;
+  message: string;
+  suggested_value?: string | null;
+}
+
+export interface BlueprintReviewResult {
+  verdict: "pass" | "warn" | "fail";
+  summary: string;
+  issues: BlueprintReviewIssue[];
+}
+
+export interface CardBlueprintDraft {
+  draft_id: string;
+  status: DraftStatus;
+  blueprint: CardBlueprint;
+  review: BlueprintReviewResult | null;
+  global_blueprint_id: string | null;
+  created_at: string | null;
+  updated_at: string | null;
+}
+
+export interface CardBlueprintDraftIndexEntry {
+  draft_id: string;
+  status: DraftStatus;
+  global_blueprint_id: string | null;
+  title: string;
+  summary: string;
+  tags: string[];
+  domain: string;
+  skills: string[];
+  mcp_servers: string[];
+  runtime_hints: string[];
+  created_at: string | null;
+  updated_at: string | null;
+}
+
+export interface ProjectDraftListResponse {
+  entries: CardBlueprintDraftIndexEntry[];
+}
+
+export interface CreateProjectDraftResponse {
+  draft_id: string;
+  warnings: string[];
+}
+
+export interface ProjectDraftResponse {
+  draft: CardBlueprintDraft;
+}
+
+export interface PublishDraftResponse {
+  draft_id: string;
+  global_blueprint_id: string;
+}
+
+export interface UpdateProjectDraftRequest {
+  title?: string;
+  summary?: string;
+  tags?: string[];
+  domain?: string;
+  instruction_blocks?: string[];
+  python_packages?: string[];
+  r_packages?: string[];
 }

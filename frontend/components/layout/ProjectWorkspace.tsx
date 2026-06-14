@@ -31,7 +31,7 @@ import { useResultsViewStore } from "@/lib/stores/results-view-store";
 import {
   EMPTY_ARTIFACT_PREVIEW_STATE,
   EMPTY_DEPENDENCY_JOBS,
-  EMPTY_SELECTED_RUNTIME_BY_CARD,
+  EMPTY_PENDING_RUN_RUNTIME_BY_CARD,
   EMPTY_SELECTED_WORKER_BY_CARD,
   EMPTY_SELECTED_PROFILE_BY_CARD,
   useWorkspaceUiStore,
@@ -42,7 +42,6 @@ import { ProjectHeader } from "./ProjectHeader";
 import { DependencyJobChip } from "@/components/dependency/DependencyJobChip";
 import { ManagerChatPanel } from "@/components/manager-chat/ManagerChatPanel";
 import { CardStream } from "@/components/cards/CardStream";
-import { CardDetailPanel } from "@/components/detail/CardDetailPanel";
 import { ResultsGrid } from "@/components/results/ResultsGrid";
 import { ReportBuilder } from "@/components/report/ReportBuilder";
 import { FilesPanel } from "@/components/files/FilesPanel";
@@ -67,16 +66,26 @@ const SettingsPanels = dynamic(
   () => import("@/components/settings/SettingsPanels").then((m) => m.SettingsPanels),
   { ssr: false },
 );
+const CapabilitiesPanel = dynamic(
+  () => import("@/components/capabilities/CapabilitiesPanel").then((m) => m.CapabilitiesPanel),
+  { ssr: false },
+);
+const AnalysisCardPage = dynamic(
+  () => import("@/components/card-library/AnalysisCardPage").then((m) => m.AnalysisCardPage),
+  { ssr: false },
+);
 
-type View = "tasks" | "results" | "files" | "report" | "advanced" | "settings";
+type View = "tasks" | "results" | "files" | "report" | "advanced" | "capabilities" | "settings" | "card-library";
 const EMPTY_CARD_INTERACTION_ORDER: string[] = [];
 
 const PAGE_INTRO: Record<Exclude<View, "tasks">, string> = {
   results: "查看和管理项目文件：数据资产、执行结果和报告导出。",
   files: "查看和管理项目文件：数据资产、执行结果和报告导出。",
   report: "查看和管理项目文件：数据资产、执行结果和报告导出。",
+  capabilities: "浏览项目已安装的 Skill 与 MCP 能力，或从本地路径安装新的能力。",
   settings: "配置项目运行时偏好、API 供应商、角色绑定和诊断选项。",
   advanced: "查看项目图结构、Git 历史、运行时诊断和卡片详情。",
+  "card-library": "管理分析卡：审查并发布可复用分析卡到全局分析卡库，管理参考数据依赖。",
 };
 
 function useMediaQuery(query: string) {
@@ -124,9 +133,9 @@ export function ProjectWorkspace({ projectId, view }: { projectId: string; view:
   const selectedWorkerByProject = useWorkspaceUiStore((s) => s.selectedWorkerByProject[projectId] ?? EMPTY_SELECTED_WORKER_BY_CARD);
   const selectedProfileByProject = useWorkspaceUiStore((s) => s.selectedProfileByProject[projectId] ?? EMPTY_SELECTED_PROFILE_BY_CARD);
   const globalPythonRuntime = useWorkspaceUiStore((s) => s.globalPythonRuntimeByProject?.[projectId]);
-  const selectedPythonRuntimeByProject = useWorkspaceUiStore((s) => s.selectedPythonRuntimeByProject?.[projectId] ?? EMPTY_SELECTED_RUNTIME_BY_CARD);
+  const pendingRunPythonRuntimeByProject = useWorkspaceUiStore((s) => s.pendingRunPythonRuntimeByProject?.[projectId] ?? EMPTY_PENDING_RUN_RUNTIME_BY_CARD);
   const globalRRuntime = useWorkspaceUiStore((s) => s.globalRRuntimeByProject?.[projectId]);
-  const selectedRRuntimeByProject = useWorkspaceUiStore((s) => s.selectedRRuntimeByProject?.[projectId] ?? EMPTY_SELECTED_RUNTIME_BY_CARD);
+  const pendingRunRRuntimeByProject = useWorkspaceUiStore((s) => s.pendingRunRRuntimeByProject?.[projectId] ?? EMPTY_PENDING_RUN_RUNTIME_BY_CARD);
   const scriptPreference = useWorkspaceUiStore((s) => s.scriptPreferenceByProject?.[projectId] ?? "auto");
   const currentChatSessionId = useWorkspaceUiStore((s) => s.currentChatSessionIdByProject[projectId] ?? null);
   currentChatSessionIdRef.current = currentChatSessionId;
@@ -136,9 +145,9 @@ export function ProjectWorkspace({ projectId, view }: { projectId: string; view:
   const setSelectedWorker = useWorkspaceUiStore((s) => s.setSelectedWorker);
   const setSelectedProfile = useWorkspaceUiStore((s) => s.setSelectedProfile);
   const setGlobalPythonRuntime = useWorkspaceUiStore((s) => s.setGlobalPythonRuntime);
-  const setSelectedPythonRuntime = useWorkspaceUiStore((s) => s.setSelectedPythonRuntime);
+  const setPendingRunPythonRuntime = useWorkspaceUiStore((s) => s.setPendingRunPythonRuntime);
   const setGlobalRRuntime = useWorkspaceUiStore((s) => s.setGlobalRRuntime);
-  const setSelectedRRuntime = useWorkspaceUiStore((s) => s.setSelectedRRuntime);
+  const setPendingRunRRuntime = useWorkspaceUiStore((s) => s.setPendingRunRRuntime);
   const setScriptPreference = useWorkspaceUiStore((s) => s.setScriptPreference);
   const setNotice = useWorkspaceUiStore((s) => s.setNotice);
   const mobileTab = useWorkspaceUiStore((s) => s.mobileTabByProject[projectId] ?? "chat");
@@ -197,7 +206,6 @@ export function ProjectWorkspace({ projectId, view }: { projectId: string; view:
       : snapshot?.cards.find((item) => item.card_id === selectedCardId) ?? defaultTaskCard;
   const selectedRunId = selectedCard?.linked_runs.at(-1);
   const selectedRun = snapshot?.graph.runs.find((item) => item.run_id === selectedRunId);
-  const selectedWorkItem = workOrderQuery.data?.work_items.find((item) => item.card_id === selectedCard?.card_id);
   const configuredWorkers = useMemo(
     () => (environmentQuery.data?.worker_capabilities ?? []).filter((item) => item.configured),
     [environmentQuery.data?.worker_capabilities],
@@ -450,8 +458,8 @@ export function ProjectWorkspace({ projectId, view }: { projectId: string; view:
   const selectedWorkerType = selectedCard
     ? selectedWorkerByProject[selectedCard.card_id] ?? selectedRun?.worker_type ?? configuredWorkers[0]?.worker_type
     : configuredWorkers[0]?.worker_type;
-  const selectedPythonRuntime = selectedCard ? selectedPythonRuntimeByProject[selectedCard.card_id] : undefined;
-  const selectedRRuntime = selectedCard ? selectedRRuntimeByProject[selectedCard.card_id] : undefined;
+  const selectedPythonRuntime = selectedCard ? pendingRunPythonRuntimeByProject[selectedCard.card_id] : undefined;
+  const selectedRRuntime = selectedCard ? pendingRunRRuntimeByProject[selectedCard.card_id] : undefined;
   const allResultAssets = useMemo(
     () => (resultsQuery.data ? [...resultsQuery.data.accepted, ...resultsQuery.data.candidate, ...resultsQuery.data.other] : []),
     [resultsQuery.data],
@@ -619,8 +627,19 @@ export function ProjectWorkspace({ projectId, view }: { projectId: string; view:
       workerType = selectedWorkerByProject[card.card_id] ?? configuredWorkers[0]?.worker_type;
       profileId = preferredExecutorProfile(executorProfiles.filter((p) => p.enabled), workerType)?.profile_id;
     }
-    const pythonRuntime = selectedPythonRuntimeByProject[card.card_id] ?? effectiveGlobalPythonRuntime ?? "__system__";
-    const rRuntime = selectedRRuntimeByProject[card.card_id] ?? effectiveGlobalRRuntime ?? "__system__";
+    // Priority: run temp override > card pinned binding > project sidebar > system
+    const cardCtx = card.executor_context as Record<string, unknown> | null | undefined;
+    const cardBindings = cardCtx?.runtime_bindings as { conda_env?: string | null; r_env?: string | null } | undefined;
+    const pythonRuntime =
+      pendingRunPythonRuntimeByProject[card.card_id]
+      ?? cardBindings?.conda_env
+      ?? effectiveGlobalPythonRuntime
+      ?? "__system__";
+    const rRuntime =
+      pendingRunRRuntimeByProject[card.card_id]
+      ?? cardBindings?.r_env
+      ?? effectiveGlobalRRuntime
+      ?? "__system__";
     try {
       const response = await startRunMutation.mutateAsync({ cardId: card.card_id, workerType, profileId, pythonRuntime, rRuntime });
       if (response.status === "cancelled") {
@@ -733,17 +752,17 @@ export function ProjectWorkspace({ projectId, view }: { projectId: string; view:
           rRuntimes={environmentQuery.data?.r_runtimes ?? []}
           globalPythonRuntime={effectiveGlobalPythonRuntime}
           globalRRuntime={effectiveGlobalRRuntime}
-          selectedPythonRuntimeByCard={selectedPythonRuntimeByProject}
-          selectedRRuntimeByCard={selectedRRuntimeByProject}
+          pendingRunPythonRuntimeByCard={pendingRunPythonRuntimeByProject}
+          pendingRunRRuntimeByCard={pendingRunRRuntimeByProject}
           onSelectPythonRuntime={(card, runtime) => {
             if (autoLocked) return;
-            setSelectedPythonRuntime(projectId, card.card_id, runtime);
-            setNotice(projectId, `Card ${card.card_id} Python runtime: ${runtime ? formatRuntime(runtime) : "follow global"}。`);
+            setPendingRunPythonRuntime(projectId, card.card_id, runtime);
+            setNotice(projectId, `Card ${card.card_id} 本次运行 Python: ${runtime ? formatRuntime(runtime) : "使用当前生效值"}。`);
           }}
           onSelectRRuntime={(card, runtime) => {
             if (autoLocked) return;
-            setSelectedRRuntime(projectId, card.card_id, runtime);
-            setNotice(projectId, `Card ${card.card_id} R runtime: ${runtime ? formatRuntime(runtime) : "follow global"}。`);
+            setPendingRunRRuntime(projectId, card.card_id, runtime);
+            setNotice(projectId, `Card ${card.card_id} 本次运行 R: ${runtime ? formatRuntime(runtime) : "使用当前生效值"}。`);
           }}
         />
       </div>
@@ -798,8 +817,12 @@ export function ProjectWorkspace({ projectId, view }: { projectId: string; view:
             title={
               view === "results" || view === "files" || view === "report"
                 ? "文件管理"
+                : view === "capabilities"
+                ? "能力中心"
                 : view === "settings"
                 ? "工作台设置"
+                : view === "card-library"
+                ? "分析卡"
                 : "技术详情"
             }
           />
@@ -901,18 +924,11 @@ export function ProjectWorkspace({ projectId, view }: { projectId: string; view:
                 globalPythonRuntime={effectiveGlobalPythonRuntime}
                 globalRRuntime={effectiveGlobalRRuntime}
               />
-              {selectedCard ? (
-                <div className="card-detail-panel-shell">
-                  <CardDetailPanel
-                    card={selectedCard}
-                    summary={snapshot.summary}
-                    workItem={selectedWorkItem}
-                  />
-                </div>
-              ) : null}
             </div>
           ) : null}
-          {view === "settings" ? (
+          {view === "capabilities" ? (
+            <CapabilitiesPanel projectId={projectId} />
+          ) : view === "settings" ? (
             <SettingsPanels
               projectId={projectId}
               project={snapshot.project}
@@ -920,6 +936,8 @@ export function ProjectWorkspace({ projectId, view }: { projectId: string; view:
               rRuntimes={environmentQuery.data?.r_runtimes ?? []}
               readOnly={autoLocked}
             />
+          ) : view === "card-library" ? (
+            <AnalysisCardPage projectId={projectId} />
           ) : null}
         </div>
         ) : null}
@@ -971,17 +989,17 @@ export function ProjectWorkspace({ projectId, view }: { projectId: string; view:
                 rRuntimes={environmentQuery.data?.r_runtimes ?? []}
                 globalPythonRuntime={effectiveGlobalPythonRuntime}
                 globalRRuntime={effectiveGlobalRRuntime}
-                selectedPythonRuntimeByCard={selectedPythonRuntimeByProject}
-                selectedRRuntimeByCard={selectedRRuntimeByProject}
+                pendingRunPythonRuntimeByCard={pendingRunPythonRuntimeByProject}
+                pendingRunRRuntimeByCard={pendingRunRRuntimeByProject}
                 onSelectPythonRuntime={(card, runtime) => {
                   if (autoLocked) return;
-                  setSelectedPythonRuntime(projectId, card.card_id, runtime);
-                  setNotice(projectId, `Card ${card.card_id} Python runtime: ${runtime ? formatRuntime(runtime) : "follow global"}。`);
+                  setPendingRunPythonRuntime(projectId, card.card_id, runtime);
+                  setNotice(projectId, `Card ${card.card_id} 本次运行 Python: ${runtime ? formatRuntime(runtime) : "使用当前生效值"}。`);
                 }}
                 onSelectRRuntime={(card, runtime) => {
                   if (autoLocked) return;
-                  setSelectedRRuntime(projectId, card.card_id, runtime);
-                  setNotice(projectId, `Card ${card.card_id} R runtime: ${runtime ? formatRuntime(runtime) : "follow global"}。`);
+                  setPendingRunRRuntime(projectId, card.card_id, runtime);
+                  setNotice(projectId, `Card ${card.card_id} 本次运行 R: ${runtime ? formatRuntime(runtime) : "使用当前生效值"}。`);
                 }}
               />
             )
@@ -1040,18 +1058,11 @@ export function ProjectWorkspace({ projectId, view }: { projectId: string; view:
                     globalPythonRuntime={effectiveGlobalPythonRuntime}
                     globalRRuntime={effectiveGlobalRRuntime}
                   />
-                  {selectedCard ? (
-                    <div className="card-detail-panel-shell">
-                      <CardDetailPanel
-                        card={selectedCard}
-                        summary={snapshot.summary}
-                        workItem={selectedWorkItem}
-                      />
-                    </div>
-                  ) : null}
                 </>
               ) : null}
-              {view === "settings" ? (
+              {view === "capabilities" ? (
+                <CapabilitiesPanel projectId={projectId} />
+              ) : view === "settings" ? (
                 <SettingsPanels
                   projectId={projectId}
                   project={snapshot.project}
@@ -1059,6 +1070,8 @@ export function ProjectWorkspace({ projectId, view }: { projectId: string; view:
                   rRuntimes={environmentQuery.data?.r_runtimes ?? []}
                   readOnly={autoLocked}
                 />
+              ) : view === "card-library" ? (
+                <AnalysisCardPage projectId={projectId} />
               ) : null}
             </div>
           ) : null}

@@ -648,6 +648,70 @@ button {
   border: 1px solid var(--line);
 }
 
+.settings-field textarea {
+  width: 100%;
+  min-width: 0;
+  padding: 10px 12px;
+  border-radius: 12px;
+  border: 1px solid var(--line);
+  background: var(--panel-2);
+  color: var(--text);
+  font-size: 13px;
+  outline: none;
+  font-family: inherit;
+  resize: vertical;
+}
+
+.settings-kv-row {
+  display: grid;
+  grid-template-columns: 1fr 1fr auto;
+  gap: 8px;
+  align-items: center;
+}
+
+.settings-kv-row input {
+  width: 100%;
+  min-width: 0;
+  padding: 8px 10px;
+  border-radius: 10px;
+  border: 1px solid var(--line);
+  background: var(--panel-2);
+  color: var(--text);
+  font-size: 13px;
+  outline: none;
+}
+
+.capability-install-tabs {
+  display: flex;
+  gap: 8px;
+  flex-wrap: wrap;
+  padding: 4px;
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  background: var(--panel-2);
+}
+
+.capability-install-tab {
+  padding: 8px 12px;
+  border-radius: 10px;
+  font-size: 13px;
+  color: var(--muted);
+  background: transparent;
+  border: 1px solid transparent;
+  cursor: pointer;
+}
+
+.capability-install-tab:hover {
+  color: var(--text);
+  background: var(--bg-hover);
+}
+
+.capability-install-tab.active {
+  color: var(--text);
+  background: var(--panel-solid);
+  border-color: var(--line);
+}
+
 .settings-status {
   color: var(--muted);
   font-size: 12px;
@@ -1537,6 +1601,24 @@ button {
   grid-template-columns: repeat(2, minmax(0, 1fr));
   gap: 0;
   min-height: 100vh;
+  height: 100vh;
+}
+
+.task-workspace.has-detail {
+  grid-template-columns: minmax(320px, 0.32fr) minmax(0, 1fr) 360px;
+}
+
+.task-workspace .task-card-detail-panel-shell {
+  height: 100vh;
+  min-height: 100vh;
+  border-left: 1px solid var(--line);
+  background: var(--panel-solid);
+}
+
+.task-workspace .task-card-detail-panel-shell .card-detail-panel {
+  border-radius: 0;
+  border: 0;
+  box-shadow: none;
   height: 100vh;
 }
 
@@ -4598,4 +4680,776 @@ button {
   .nav-runtime-grid {
     grid-template-columns: repeat(2, minmax(0, 1fr));
   }
+}
+
+/* =========================================================================
+   Card Library Page
+   ========================================================================= */
+
+/* ---------------------------------------------------------------------------
+ * Card Library — playing card deck
+ * --------------------------------------------------------------------------- */
+
+.card-library-page {
+  display: flex;
+  flex-direction: column;
+  height: 100vh;
+  background: var(--bg);
+}
+
+.card-library-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 16px 24px;
+  border-bottom: 1px solid var(--line);
+  background: var(--bg-elevated);
+  gap: 16px;
+  flex-wrap: wrap;
+}
+
+.card-library-content {
+  flex: 1;
+  overflow-y: auto;
+  padding: 32px 24px;
+  display: flex;
+  justify-content: center;
+}
+
+.card-library-content > .empty-state {
+  align-self: center;
+  text-align: center;
+}
+
+.card-library-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(180px, 1fr));
+  grid-auto-rows: 252px;
+  gap: 18px;
+  width: 100%;
+  max-width: 1200px;
+  align-content: start;
+}
+
+/* ---------------------------------------------------------------------------
+ * Blueprint card (grid item) — clean modern card, expands in-flow
+ * --------------------------------------------------------------------------- */
+
+.bp-card {
+  --accent: var(--blue);
+
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  background: var(--bg-soft);
+  border: 1px solid var(--line);
+  border-radius: 20px;
+  overflow: hidden;
+  width: 100%;
+  grid-column: span 1;
+  box-shadow: 0 4px 12px rgba(0, 0, 0, 0.06), 0 1px 3px rgba(0, 0, 0, 0.04);
+  transition:
+    transform 320ms cubic-bezier(0.2, 0.85, 0.25, 1),
+    box-shadow 320ms ease,
+    border-color 320ms ease;
+  transform-origin: center top;
+}
+
+/* The clickable face is a real button so the expanded sibling region can host
+   interactive controls (delete/publish/edit) without nesting buttons. */
+.bp-card-face {
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  flex: 1 1 auto;
+  min-height: 0;
+  padding: 0;
+  background: none;
+  border: none;
+  text-align: left;
+  cursor: pointer;
+  color: inherit;
+  font: inherit;
+}
+
+.bp-card-face:focus-visible {
+  outline: none;
+}
+
+.bp-card:focus-within {
+  border-color: var(--blue);
+  box-shadow: 0 0 0 1px var(--blue-border), 0 12px 28px rgba(59, 130, 246, 0.16);
+}
+
+/* Badge header — dossier-style: faint blue-white gradient, a top-center clip
+   handle, a domain-tinted avatar, the title and a status row. */
+.bp-card-badge-header {
+  position: relative;
+  padding: 18px 14px 10px;
+  background: linear-gradient(to bottom, #f8fafc, #ffffff);
+}
+
+.bp-card-clip {
+  position: absolute;
+  top: 8px;
+  left: 50%;
+  transform: translateX(-50%);
+  width: 34px;
+  height: 5px;
+  border-radius: 4px;
+  background: var(--accent);
+  opacity: 0.4;
+}
+
+.bp-card-identity {
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
+}
+
+.bp-card-avatar {
+  flex-shrink: 0;
+  width: 34px;
+  height: 34px;
+  border-radius: 10px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: color-mix(in srgb, var(--accent) 16%, #ffffff);
+  color: var(--accent);
+  box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--accent) 30%, transparent);
+}
+
+.bp-card-copy {
+  min-width: 0;
+  flex: 1;
+}
+
+.bp-card-title {
+  font-size: 13px;
+  font-weight: 700;
+  line-height: 1.3;
+  color: var(--text);
+  margin-bottom: 5px;
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+}
+
+.bp-card-status-row {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex-wrap: wrap;
+}
+
+.bp-card-domain-pill {
+  display: inline-flex;
+  align-items: center;
+  font-size: 9px;
+  font-weight: 700;
+  text-transform: capitalize;
+  letter-spacing: 0.2px;
+  padding: 2px 7px;
+  border-radius: 999px;
+  color: var(--accent);
+  background: color-mix(in srgb, var(--accent) 12%, #ffffff);
+  max-width: 120px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.bp-card-badge {
+  font-size: 9px;
+  font-weight: 800;
+  padding: 2px 7px;
+  border-radius: 999px;
+  line-height: 1.5;
+}
+
+/* Collapsed body: summary + outlined pill meta (in/out/files style). */
+.bp-card-body {
+  display: flex;
+  flex: 1;
+  flex-direction: column;
+  justify-content: flex-end;
+  gap: 8px;
+  padding: 8px 12px 14px;
+}
+
+.bp-card-summary {
+  margin: 0;
+  font-size: 11px;
+  line-height: 1.5;
+  color: var(--text-secondary);
+  display: -webkit-box;
+  -webkit-line-clamp: 3;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+}
+
+.bp-card-meta {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.bp-card-meta span {
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+  padding: 3px 7px;
+  border-radius: 999px;
+  font-size: 9px;
+  font-weight: 700;
+  color: var(--muted);
+  border: 1px solid var(--line);
+  background: rgba(255, 255, 255, 0.78);
+  max-width: 100%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* Non-expanded hover lift, matching the dossier card. */
+.bp-card:not(.expanded):hover {
+  border-color: var(--line-strong);
+  transform: translateY(-2px) scale(1.03);
+  box-shadow: 0 12px 32px rgba(0, 0, 0, 0.1), 0 4px 12px rgba(0, 0, 0, 0.06);
+  z-index: 2;
+}
+
+/* Expanded: occupy two grid tracks and grow taller in-place. The size change
+   snaps (CSS can't transition grid tracks); the FLIP hook slides the
+   displaced neighbors and the detail content fades in below. */
+.bp-card.expanded {
+  grid-column: span 2;
+  grid-row: span 2;
+  min-height: 500px;
+  z-index: 5;
+  border-color: var(--blue);
+  box-shadow:
+    0 0 0 1px var(--blue-border),
+    0 24px 56px rgba(59, 130, 246, 0.2),
+    0 8px 20px rgba(15, 23, 42, 0.08);
+  animation: bp-card-pop 240ms cubic-bezier(0.2, 0.85, 0.25, 1);
+}
+
+.bp-card.expanded .bp-card-face {
+  flex: 0 0 auto;
+}
+
+@keyframes bp-card-pop {
+  from { transform: scale(0.97); }
+  to { transform: scale(1); }
+}
+
+/* In-flow expanded region: actions toolbar + detail panel. */
+.bp-card-expanded {
+  border-top: 1px solid var(--line);
+  background: var(--bg);
+  overflow-y: auto;
+  animation: bp-detail-in 240ms ease both;
+}
+
+.bp-card-toolbar {
+  position: sticky;
+  top: 0;
+  z-index: 1;
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 8px;
+  flex-wrap: wrap;
+  padding: 10px 16px;
+  background: var(--bg-elevated);
+  border-bottom: 1px solid var(--line);
+}
+
+/* The detail panel used to live in a fixed overlay sized to the viewport;
+   inside the in-flow cell it must not introduce a second scroll container. */
+.bp-card-expanded .playing-card-detail {
+  height: auto;
+  max-height: none;
+  overflow: visible;
+}
+
+@keyframes bp-detail-in {
+  from { opacity: 0; transform: translateY(6px); }
+  to { opacity: 1; transform: translateY(0); }
+}
+
+/* Inline accordion detail panel for the list (deck) variant. */
+.deck-item-detail {
+  background: var(--bg-elevated);
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  overflow: hidden;
+  animation: bp-detail-in 240ms ease both;
+}
+
+.deck-item-detail .playing-card-detail {
+  height: auto;
+  max-height: none;
+  overflow: visible;
+}
+
+/* ---------------------------------------------------------------------------
+ * Detail panel inside expanded card
+ * --------------------------------------------------------------------------- */
+
+.playing-card-detail {
+  width: 100%;
+  height: 100%;
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+  padding: 18px 20px 22px;
+  overflow-y: auto;
+}
+
+.playing-card-detail.empty {
+  align-items: center;
+  justify-content: center;
+  color: var(--muted);
+}
+
+.playing-card-detail-header {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.playing-card-detail-title {
+  flex: 1;
+  min-width: 0;
+}
+
+.playing-card-detail-title h2 {
+  margin: 0 0 6px;
+  font-size: 20px;
+  font-weight: 800;
+  line-height: 1.2;
+  color: var(--text);
+}
+
+.playing-card-detail-title p {
+  margin: 0;
+  font-size: 13px;
+  color: var(--text-secondary);
+  line-height: 1.45;
+}
+
+.playing-card-detail-actions {
+  display: flex;
+  gap: 8px;
+  flex-shrink: 0;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+}
+
+.playing-card-detail-section {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.playing-card-detail-section-title {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 11px;
+  font-weight: 700;
+  color: var(--muted);
+  letter-spacing: 0.3px;
+}
+
+.playing-card-detail-section-title .section-icon {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 18px;
+  height: 18px;
+  border-radius: 5px;
+  background: var(--bg-soft);
+  color: var(--text-secondary);
+}
+
+.playing-card-detail-meta {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  align-items: center;
+}
+
+.playing-card-detail-meta .pill.domain-pill {
+  background: var(--blue-bg);
+  color: var(--blue-dark);
+  font-weight: 600;
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+}
+
+.playing-card-detail-chips {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.capability-chip.runtime {
+  background: var(--bg-soft);
+  color: var(--text-secondary);
+  border: 1px solid var(--line);
+}
+
+/* Interface (inputs/outputs/parameters) */
+.playing-card-detail-interface {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.interface-block {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 10px 12px;
+  border-radius: 8px;
+  background: var(--bg-soft);
+}
+
+.interface-label {
+  font-size: 10px;
+  font-weight: 700;
+  color: var(--muted);
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+}
+
+.interface-list {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.interface-row {
+  display: grid;
+  grid-template-columns: 1fr auto;
+  gap: 12px;
+  align-items: baseline;
+  font-size: 12px;
+  line-height: 1.35;
+}
+
+.interface-name {
+  font-weight: 600;
+  color: var(--text);
+  word-break: break-word;
+}
+
+.interface-formats {
+  color: var(--muted);
+  text-align: right;
+  white-space: nowrap;
+  font-size: 11px;
+}
+
+.playing-card-detail-instructions {
+  margin: 0;
+  padding-left: 18px;
+  color: var(--text-secondary);
+  font-size: 12px;
+  line-height: 1.55;
+}
+
+.playing-card-detail-instructions li {
+  margin-bottom: 4px;
+}
+
+.playing-card-detail-footer {
+  margin-top: auto;
+  padding-top: 12px;
+  border-top: 1px solid var(--line);
+  display: flex;
+  flex-wrap: wrap;
+  gap: 12px;
+  font-size: 11px;
+  color: var(--muted);
+}
+
+.playing-card-detail-footer span {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+}
+
+.review-summary {
+  margin: 0 0 8px;
+  font-size: 12px;
+  color: var(--muted);
+}
+
+.review-issues {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.review-issue {
+  padding: 8px 10px;
+  border-radius: 6px;
+  font-size: 11px;
+  line-height: 1.4;
+}
+
+.review-issue.error {
+  background: var(--red-bg);
+  color: var(--red-dark);
+}
+
+.review-issue.warning {
+  background: var(--amber-bg);
+  color: var(--amber-dark);
+}
+
+.review-issue.info {
+  background: var(--blue-bg);
+  color: var(--blue-dark);
+}
+
+.review-issue-header {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin-bottom: 3px;
+}
+
+.review-issue-header strong {
+  text-transform: capitalize;
+}
+
+.review-issue-message {
+  font-weight: 500;
+}
+
+.review-issue-suggestion {
+  margin-top: 3px;
+  opacity: 0.85;
+}
+
+/* ---------------------------------------------------------------------------
+ * Responsive
+ * --------------------------------------------------------------------------- */
+
+@media (max-width: 640px) {
+  .card-library-grid {
+    grid-template-columns: 1fr;
+  }
+
+  .bp-card.expanded {
+    grid-column: span 1;
+    min-height: 460px;
+  }
+
+  .playing-card-detail {
+    padding: 14px 16px 18px;
+    gap: 12px;
+  }
+
+  .playing-card-detail-title h2 {
+    font-size: 16px;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .bp-card,
+  .bp-card.expanded,
+  .bp-card-expanded,
+  .bp-card-face {
+    transition: none;
+    animation: none;
+  }
+
+  .bp-card:not(.expanded):hover {
+    transform: none;
+  }
+}
+
+/* ---------------------------------------------------------------------------
+ * Legacy / shared helpers still used by deck panel
+ * --------------------------------------------------------------------------- */
+
+.capability-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+  font-size: 10px;
+  font-weight: 500;
+  padding: 2px 6px;
+  border-radius: 4px;
+  max-width: 120px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.capability-chip.skill {
+  background: var(--green-bg);
+  color: var(--green-dark);
+}
+
+.capability-chip.mcp {
+  background: var(--purple-bg, #f3e8ff);
+  color: var(--purple-dark, #6b21a8);
+}
+
+.capability-chip.more {
+  background: var(--muted-bg);
+  color: var(--text-secondary);
+}
+
+.search-input-wrap {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  background: var(--bg);
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  padding: 6px 10px;
+  min-width: 200px;
+}
+
+.search-input-wrap input {
+  border: none;
+  background: none;
+  outline: none;
+  font-size: 13px;
+  flex: 1;
+  color: var(--text);
+}
+
+/* BlueprintDeck Panel (project sidebar) */
+
+.deck-panel {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 0;
+}
+
+.deck-panel-search {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  background: var(--bg);
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  padding: 6px 10px;
+}
+
+.deck-panel-search input {
+  border: none;
+  background: none;
+  outline: none;
+  font-size: 13px;
+  flex: 1;
+  color: var(--text);
+}
+
+.deck-item {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  padding: 10px 12px;
+  background: var(--bg);
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  cursor: pointer;
+  transition: border-color 0.15s;
+  text-align: left;
+  width: 100%;
+}
+
+.deck-item:hover {
+  border-color: var(--blue-border);
+}
+
+.deck-item.selected {
+  border-color: var(--blue);
+  background: var(--blue-bg);
+}
+
+.deck-item-title {
+  font-size: 13px;
+  font-weight: 600;
+}
+
+.deck-item-meta {
+  display: flex;
+  gap: 8px;
+  font-size: 11px;
+  color: var(--muted);
+  align-items: center;
+}
+
+.deck-item-meta span {
+  display: flex;
+  align-items: center;
+  gap: 3px;
+}
+
+.deck-field {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.deck-field label {
+  font-size: 12px;
+  font-weight: 500;
+  color: var(--text-secondary);
+}
+
+.deck-field select,
+.deck-field input {
+  padding: 6px 8px;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  background: var(--bg);
+  font-size: 13px;
+  color: var(--text);
+}
+
+/* Capabilities Panel Tabs */
+
+.capabilities-tabs {
+  display: flex;
+  border-bottom: 1px solid var(--line);
+  margin-bottom: 16px;
+  gap: 0;
+}
+
+.capabilities-tab {
+  padding: 8px 16px;
+  font-size: 13px;
+  font-weight: 500;
+  color: var(--muted);
+  background: none;
+  border: none;
+  border-bottom: 2px solid transparent;
+  cursor: pointer;
+  transition: color 0.15s, border-color 0.15s;
+}
+
+.capabilities-tab:hover {
+  color: var(--text);
+}
+
+.capabilities-tab.active {
+  color: var(--blue);
+  border-bottom-color: var(--blue);
 }

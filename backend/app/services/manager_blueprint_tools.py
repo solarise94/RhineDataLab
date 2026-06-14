@@ -28,6 +28,7 @@ from app.services.library_registry_service import LibraryRegistryService
 from app.services.manager_planner import ManagerPlanningError
 from app.services.module_group_state_service import ModuleGroupStateService
 from app.services.mounted_data_directory_service import MountedDataDirectoryService
+from app.services.package_service import PackageService
 from app.services.project_service import ProjectService
 from app.services.result_asset_service import ResultAssetService
 from app.services.runtime_dependency_job_service import RuntimeDependencyJobService
@@ -253,6 +254,7 @@ class ManagerBlueprintTools:
         runtime_dependency_resolver_service: RuntimeDependencyResolverService | None = None,
         library_registry_service: LibraryRegistryService | None = None,
         background_workboard_service: BackgroundWorkboardService | None = None,
+        package_service: PackageService | None = None,
     ) -> None:
         self.project_service = project_service
         self.worker_service = worker_service
@@ -262,6 +264,11 @@ class ManagerBlueprintTools:
             project_service,
             AppConfigService(project_service.settings),
             project_service.settings,
+        )
+        self.package_service = package_service or PackageService(
+            self.library_registry_service,
+            project_service,
+            runtime_dependency_resolver=self.runtime_dependency_resolver_service,
         )
         self.result_asset_service = ResultAssetService(project_service)
         self.asset_timeline_service = AssetTimelineService()
@@ -880,7 +887,7 @@ class ManagerBlueprintTools:
                 card_ids = [card_id]
         if not card_ids:
             raise ManagerPlanningError("configure_card_execution requires card_id or card_ids.")
-        runtime_bindings = request.runtime_bindings.model_dump(exclude_none=True) if request.runtime_bindings else {}
+        runtime_bindings = request.runtime_bindings.model_dump(exclude_unset=True) if request.runtime_bindings else {}
         with self.project_service.lock_for(project_id):
             store = self.project_service.graph_store(project_id)
             graph = store.load_graph()
@@ -910,10 +917,23 @@ class ManagerBlueprintTools:
                     context.skills = [str(item).strip() for item in request.skills if str(item).strip()]
                 if request.mcp_servers is not None:
                     context.mcp_servers = [str(item).strip() for item in request.mcp_servers if str(item).strip()]
+                touched_runtime = False
                 if "conda_env" in runtime_bindings:
-                    context.runtime_bindings.conda_env = runtime_bindings.get("conda_env")
+                    val = runtime_bindings.get("conda_env")
+                    context.runtime_bindings.conda_env = val
+                    context.runtime_bindings.python_runtime_source = "card_override" if val else None
+                    touched_runtime = True
                 if "r_env" in runtime_bindings:
-                    context.runtime_bindings.r_env = runtime_bindings.get("r_env")
+                    val = runtime_bindings.get("r_env")
+                    context.runtime_bindings.r_env = val
+                    context.runtime_bindings.r_runtime_source = "card_override" if val else None
+                    touched_runtime = True
+                # Deprecated single-field runtime_source: derive from split sources so that
+                # partial clears (e.g. conda_env=None but r_env still set) don't lose the signal.
+                if touched_runtime:
+                    py_src = context.runtime_bindings.python_runtime_source
+                    r_src = context.runtime_bindings.r_runtime_source
+                    context.runtime_bindings.runtime_source = py_src or r_src
                 if request.instruction_blocks is not None:
                     new_blocks = [str(b).strip() for b in request.instruction_blocks if str(b).strip()]
                     merged = list(context.instruction_blocks or [])
@@ -1054,7 +1074,6 @@ class ManagerBlueprintTools:
             runtime=runtime,
             tags=tags,
             top_k=top_k,
-            minimal=True,
         )
         result["project_id"] = project_id
         return result
@@ -1070,7 +1089,6 @@ class ManagerBlueprintTools:
             runtime=runtime,
             tags=tags,
             top_k=top_k,
-            minimal=True,
         )
         result["project_id"] = project_id
         return result
@@ -1090,6 +1108,86 @@ class ManagerBlueprintTools:
             raise ManagerPlanningError(str(exc)) from exc
         payload["project_id"] = project_id
         return payload
+
+    # ------------------------------------------------------------------
+    # Portable Card Package tools
+    # ------------------------------------------------------------------
+
+    def search_card_packages(self, project_id: str, payload: dict) -> dict:
+        query = str(payload.get("query") or payload.get("q") or "").strip()
+        runtime = str(payload.get("runtime") or "").strip() or None
+        tags = [str(item).strip() for item in payload.get("tags") or [] if str(item).strip()]
+        top_k = int(payload.get("top_k") or payload.get("limit") or 8)
+        results = self.package_service.search_packages(
+            query=query,
+            runtime=runtime,
+            tags=tags,
+            top_k=top_k,
+        )
+        return {
+            "project_id": project_id,
+            "query": query,
+            "items": results,
+            "summary": f"{len(results)} package matches.",
+        }
+
+    def get_card_package_detail(self, project_id: str, package_id: str, version: str | None = None) -> dict:
+        package = self.package_service.get_package(package_id, version)
+        if package is None:
+            raise ManagerPlanningError(f"Package not found: {package_id}")
+        return {
+            "project_id": project_id,
+            "package_id": package_id,
+            "version": package.manifest.version,
+            "manifest": package.manifest.model_dump(),
+            "bundle_files": list(package.bundle_files.keys()),
+        }
+
+    def import_card_package(self, project_id: str, payload: dict) -> dict:
+        source_path = str(payload.get("source_path") or "").strip()
+        overwrite = bool(payload.get("overwrite"))
+        if not source_path:
+            raise ManagerPlanningError("source_path is required.")
+        result = self.package_service.import_package(source_path, overwrite=overwrite)
+        return {
+            "project_id": project_id,
+            "status": result.status,
+            "package_id": result.package_id,
+            "version": result.version,
+            "warnings": result.warnings,
+            "blockers": result.blockers,
+        }
+
+    def instantiate_card_package(self, project_id: str, payload: dict) -> dict:
+        package_id = str(payload.get("package_id") or "").strip()
+        version = str(payload.get("version") or "").strip() or None
+        input_bindings = dict(payload.get("input_bindings") or {})
+        parameter_bindings = dict(payload.get("parameter_bindings") or {})
+        runtime_override = dict(payload.get("runtime_override") or {})
+        if not package_id:
+            raise ManagerPlanningError("package_id is required.")
+        result = self.package_service.instantiate_package(
+            package_id=package_id,
+            project_id=project_id,
+            input_bindings=input_bindings,
+            parameter_bindings=parameter_bindings,
+            runtime_override=runtime_override or None,
+            version=version,
+        )
+        if result.blockers:
+            raise ManagerPlanningError("; ".join(result.blockers))
+        return {
+            "project_id": project_id,
+            "card_id": result.card_id,
+            "package_id": result.package_id,
+            "version": result.version,
+            "effective_python_runtime": result.effective_python_runtime,
+            "effective_r_runtime": result.effective_r_runtime,
+            "runtime_source": result.runtime_source,
+            "python_runtime_source": result.python_runtime_source,
+            "r_runtime_source": result.r_runtime_source,
+            "warnings": result.warnings,
+        }
 
     def install_runtime_dependencies(self, project_id: str, payload: dict, session_id: str | None = None) -> dict:
         if self.runtime_dependency_job_service is None:

@@ -442,13 +442,18 @@ class RemediationTestCase(unittest.TestCase):
     def test_websocket_client_disconnect_does_not_raise(self) -> None:
         # Regression: after a normal client disconnect, the server must not throw
         # RuntimeError from a second websocket.close() in the finally block.
+        # The WebSocket handler watches for client disconnect via a concurrent
+        # receive task, so a non-terminal run no longer causes an infinite loop.
         from fastapi.testclient import TestClient
         from app.main import app
 
         self._make_run("run_ws", status="running")
         client = TestClient(app)
-        with client.websocket_connect("/api/projects/test-project/runs/run_ws/ws"):
-            pass  # client disconnects on exit of context manager
+        with client.websocket_connect("/api/projects/test-project/runs/run_ws/ws") as ws:
+            # Send a small sleep to let the handler start, then exit —
+            # the client disconnect will be detected by the watcher task.
+            import time
+            time.sleep(0.3)
         # If we reach here without an exception, the fix works.
 
     def test_finalize_run_review_downgrades_to_needs_review_on_ambiguous_outputs(self) -> None:

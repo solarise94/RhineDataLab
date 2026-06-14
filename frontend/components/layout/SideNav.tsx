@@ -7,10 +7,12 @@ import { useMutation, useQueryClient } from "@tanstack/react-query";
 import {
   ChevronDown,
   FolderGit2,
+  Layers,
   Package,
   Beaker,
   MessageSquareText,
   Plus,
+  Puzzle,
   Trash2,
   Settings2,
 } from "lucide-react";
@@ -41,6 +43,8 @@ const ARTIFACT_VIEWS = new Set(["results", "files", "report"]);
 
 const primary = [
   { href: "results", label: "文件管理", icon: Package },
+  { href: "card-library", label: "牌库", icon: Layers },
+  { href: "capabilities", label: "能力中心", icon: Puzzle },
   { href: "settings", label: "工作台设置", icon: Settings2 },
 ];
 
@@ -385,6 +389,13 @@ export function SideNav({
         >
           <FolderGit2 size={16} />
           <span>技术详情</span>
+        </Link>
+        <Link
+          href={`/projects/${projectId}/global-card-library`}
+          className={`nav-link ${current === "global-card-library" ? "active" : ""}`}
+        >
+          <Layers size={16} />
+          <span>全局牌库管理</span>
         </Link>
       </div>
 

@@ -1,8 +1,11 @@
 from __future__ import annotations
 
+import fcntl
 import json
 import math
 import re
+import shutil
+from contextlib import contextmanager
 from pathlib import Path
 from typing import Any
 from urllib import error, request as url_request
@@ -65,21 +68,27 @@ class LibraryRegistryService:
     ) -> dict[str, Any]:
         registry = self._ensure_registry(kind)
         compact_query = self._normalize_text(query)
+        query_terms = compact_query.split() if compact_query else []
         tag_filters = {self._normalize_text(item) for item in (tags or []) if self._normalize_text(item)}
         runtime_filter = self._normalize_text(runtime or "")
         scored: list[tuple[float, LibraryEntry]] = []
+        match_reasons: dict[str, str] = {}
         for entry in registry.items:
             score = self._score_entry(entry, compact_query, runtime_filter, tag_filters)
             if score <= 0:
                 continue
             scored.append((score, entry))
+            match_reasons[entry.id] = self._build_match_reason(
+                entry, query_terms, runtime_filter, tag_filters
+            )
         scored.sort(key=lambda item: (-item[0], item[1].name.lower()))
         items = [
-            {
-                **(self._serialize_minimal_entry(entry) if minimal else self._serialize_entry(entry)),
-                "score": round(score, 4),
-            }
-            for score, entry in scored[: max(1, min(top_k, 20))]
+            self._serialize_minimal_entry(entry)
+            if minimal
+            else self._serialize_search_entry(
+                entry, match_reason=match_reasons.get(entry.id, "broad match")
+            )
+            for _score, entry in scored[: max(1, min(top_k, 20))]
         ]
         return {
             "kind": kind,
@@ -98,17 +107,20 @@ class LibraryRegistryService:
             raise ValueError(f"{kind} library item not found: {entry_id}")
         return {
             "kind": kind,
-            "item": self._serialize_entry(item),
+            "item": self._serialize_detail_entry(item),
             "updated_at": registry.updated_at,
         }
 
     def refresh_entries(self, kind: LibraryKind, *, force: bool = False) -> dict[str, Any]:
-        if kind == "skill":
-            items = self._build_skill_entries(force=force)
-        else:
-            items = self._build_mcp_entries(force=force)
-        registry = LibraryRegistry(kind=kind, items=items, updated_at=utc_now())
-        self._write_registry(registry)
+        # Hold the lock for the whole scan+write so a concurrent install/register
+        # cannot write a new entry between our scan and our write.
+        with self._registry_lock(kind):
+            if kind == "skill":
+                items = self._build_skill_entries(force=force)
+            else:
+                items = self._build_mcp_entries(force=force)
+            registry = LibraryRegistry(kind=kind, items=items, updated_at=utc_now())
+            self._write_registry(registry)
         return {
             "kind": kind,
             "refreshed": len(items),
@@ -117,36 +129,42 @@ class LibraryRegistryService:
         }
 
     def resummarize_entry(self, kind: LibraryKind, entry_id: str) -> dict[str, Any]:
-        registry = self._ensure_registry(kind)
-        updated: list[LibraryEntry] = []
-        target: LibraryEntry | None = None
-        for item in registry.items:
-            if item.id != entry_id:
-                updated.append(item)
-                continue
-            target = item
-            summary = self._summarize_entry_text(
-                kind,
-                name=item.name,
-                source_text=self._entry_source_text(item),
-                fallback_summary=item.summary_short,
-            )
-            refreshed = item.model_copy(
-                update={
-                    "summary_short": summary.summary_short,
-                    "summary_long": summary.summary_long,
-                    "tags": summary.tags,
-                    "use_cases": summary.use_cases,
-                    "generated_by": self.settings.library_summarizer_model,
-                    "generated_at": utc_now(),
-                }
-            )
-            updated.append(refreshed)
-            target = refreshed
-        if target is None:
-            raise ValueError(f"{kind} library item not found: {entry_id}")
-        new_registry = LibraryRegistry(kind=kind, items=updated, updated_at=utc_now())
-        self._write_registry(new_registry)
+        # Ensure the registry exists before taking the lock, preserving the
+        # rebuild-on-missing/corrupt behavior of the original _ensure_registry path.
+        self._ensure_registry(kind)
+
+        # Hold the lock for the full read-summarize-write cycle so concurrent
+        # installs/registers cannot write new entries between our read and write.
+        with self._registry_lock(kind):
+            items = self._load_registry_items(kind)
+            updated: list[LibraryEntry] = []
+            target: LibraryEntry | None = None
+            for item in items:
+                if item.id != entry_id:
+                    updated.append(item)
+                    continue
+                summary = self._summarize_entry_text(
+                    kind,
+                    name=item.name,
+                    source_text=self._entry_source_text(item),
+                    fallback_summary=item.summary_short,
+                )
+                refreshed = item.model_copy(
+                    update={
+                        "summary_short": summary.summary_short,
+                        "summary_long": summary.summary_long,
+                        "tags": summary.tags,
+                        "use_cases": summary.use_cases,
+                        "generated_by": self.settings.library_summarizer_model,
+                        "generated_at": utc_now(),
+                    }
+                )
+                updated.append(refreshed)
+                target = refreshed
+            if target is None:
+                raise ValueError(f"{kind} library item not found: {entry_id}")
+            new_registry = LibraryRegistry(kind=kind, items=updated, updated_at=utc_now())
+            self._write_registry(new_registry)
         return {
             "kind": kind,
             "item": self._serialize_entry(target),
@@ -226,6 +244,176 @@ class LibraryRegistryService:
 
     def _registry_path(self, kind: LibraryKind) -> Path:
         return self.registry_root / f"{kind}s.json"
+
+    @contextmanager
+    def _registry_lock(self, kind: LibraryKind):
+        """Exclusive file lock for the given registry kind (context manager)."""
+        lock_path = self.registry_root / f"{kind}s.lock"
+        lock_path.parent.mkdir(parents=True, exist_ok=True)
+        with lock_path.open("a") as lock_file:
+            fcntl.flock(lock_file.fileno(), fcntl.LOCK_EX)
+            try:
+                yield
+            finally:
+                fcntl.flock(lock_file.fileno(), fcntl.LOCK_UN)
+
+    @contextmanager
+    def _install_lock(self, kind: LibraryKind, entry_id: str):
+        """Exclusive file lock for installing/registering a specific capability id."""
+        lock_path = self.registry_root / f"{kind}-{entry_id}.install.lock"
+        lock_path.parent.mkdir(parents=True, exist_ok=True)
+        with lock_path.open("a") as lock_file:
+            fcntl.flock(lock_file.fileno(), fcntl.LOCK_EX)
+            try:
+                yield
+            finally:
+                fcntl.flock(lock_file.fileno(), fcntl.LOCK_UN)
+
+    @staticmethod
+    def _prepare_temp_dest(dest: Path) -> Path:
+        """Return a temporary path next to dest for atomic install/replace."""
+        import uuid
+        # Clean up stale temp/backup siblings left by interrupted installs.
+        if dest.parent.exists():
+            for sibling in dest.parent.iterdir():
+                if sibling.name.startswith(f".{dest.name}.") and (
+                    sibling.name.startswith(f".{dest.name}.tmp-") or
+                    sibling.name.startswith(f".{dest.name}.bak-")
+                ):
+                    try:
+                        shutil.rmtree(sibling)
+                    except OSError:
+                        pass
+        tmp = dest.parent / f".{dest.name}.tmp-{uuid.uuid4().hex}"
+        if tmp.exists():
+            shutil.rmtree(tmp)
+        return tmp
+
+    @staticmethod
+    def _commit_temp_dest(tmp_dest: Path, dest: Path) -> None:
+        """Atomically replace dest with tmp_dest.
+
+        Uses a backup directory so that if the final rename fails, the previous
+        installation can be restored. Any leftover backup/temp directories are
+        cleaned up on the next install.
+        """
+        import uuid
+
+        if not dest.exists():
+            tmp_dest.rename(dest)
+            return
+
+        backup = dest.parent / f".{dest.name}.bak-{uuid.uuid4().hex}"
+        dest.rename(backup)
+        try:
+            tmp_dest.rename(dest)
+        except Exception:
+            try:
+                if not dest.exists() and backup.exists():
+                    backup.rename(dest)
+            except OSError:
+                pass
+            raise
+        finally:
+            if backup.exists():
+                shutil.rmtree(backup)
+
+    @staticmethod
+    def _validate_capability_id(value: str) -> str:
+        """Return a trimmed id or raise ValueError if it is unsafe."""
+        entry_id = value.strip()
+        if not entry_id or entry_id in {".", ".."}:
+            raise ValueError("Invalid capability id")
+        if not re.fullmatch(r"[A-Za-z0-9_.-]+", entry_id):
+            raise ValueError("Capability id contains illegal characters")
+        if entry_id.startswith(".") or entry_id.endswith("."):
+            raise ValueError("Capability id cannot start or end with a dot")
+        return entry_id
+
+    @staticmethod
+    def _assert_within_root(dest: Path, root: Path) -> None:
+        """Raise ValueError if dest resolves outside root."""
+        root = root.resolve()
+        dest = dest.resolve()
+        try:
+            dest.relative_to(root)
+        except ValueError as exc:
+            raise ValueError("Target path escapes capabilities root") from exc
+
+    def _add_or_replace_entry(self, kind: LibraryKind, entry: LibraryEntry) -> None:
+        """Insert or update a single entry in the registry without re-scanning disk."""
+        with self._registry_lock(kind):
+            items = self._load_registry_items(kind)
+            by_id = {item.id: item for item in items}
+            by_id[entry.id] = entry
+            registry = LibraryRegistry(kind=kind, items=list(by_id.values()), updated_at=utc_now())
+            self._write_registry(registry)
+
+    def _build_single_skill_entry(self, skill_dir: Path, installed_id: str) -> LibraryEntry:
+        """Build a LibraryEntry for a single installed skill directory."""
+        skill_md = skill_dir / "SKILL.md"
+        source_text = self._read_source_text(skill_md)
+        source_hash = sha256_file(skill_md)
+        frontmatter = self._parse_frontmatter(source_text)
+        display_name = str(frontmatter.get("name") or installed_id)
+        fallback_summary = self._heuristic_summary("skill", display_name, source_text)
+        tags = self._heuristic_tags(display_name, source_text)
+        return LibraryEntry(
+            id=installed_id,
+            kind="skill",
+            name=display_name,
+            summary_short=fallback_summary,
+            summary_long=fallback_summary,
+            tags=self._merged_tags(["skill", skill_dir.parent.name.lstrip(".")], tags),
+            use_cases=tags[:4],
+            source_path=str(skill_md),
+            source_hash=source_hash,
+            enabled=True,
+            runtime_requirements=[],
+            compatibility_notes=[],
+            supported_runtimes=[],
+            launch_hint=None,
+            generated_by=self.settings.library_summarizer_model,
+            generated_at=utc_now(),
+            metadata={
+                "root": str(skill_dir.parent),
+                "source": str(skill_md.relative_to(skill_dir.parent)),
+            },
+        )
+
+    def _build_single_mcp_entry(self, manifest_path: Path) -> LibraryEntry:
+        """Build a LibraryEntry from a single MCP manifest/server.json path."""
+        entry_id = manifest_path.parent.name
+        text = self._read_source_text(manifest_path)
+        source_hash = sha256_file(manifest_path)
+        display_name = entry_id
+        try:
+            manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+            if manifest.get("name"):
+                display_name = str(manifest["name"])
+        except Exception:
+            pass
+        fallback_summary = self._heuristic_summary("mcp", display_name, text)
+        tags = self._heuristic_tags(display_name, text)
+        return LibraryEntry(
+            id=entry_id,
+            kind="mcp",
+            name=display_name,
+            summary_short=fallback_summary,
+            summary_long=fallback_summary,
+            tags=self._merged_tags(["mcp"], tags),
+            use_cases=tags[:4],
+            source_path=str(manifest_path),
+            source_hash=source_hash,
+            enabled=True,
+            runtime_requirements=[],
+            compatibility_notes=[],
+            supported_runtimes=[],
+            launch_hint="see source manifest",
+            generated_by=self.settings.library_summarizer_model,
+            generated_at=utc_now(),
+            metadata={"root": str(manifest_path.parent)},
+        )
 
     def _build_skill_entries(self, *, force: bool) -> list[LibraryEntry]:
         previous = self._load_registry_items("skill")
@@ -330,21 +518,39 @@ class LibraryRegistryService:
     def _scan_mcp_sources(self) -> list[dict[str, Any]]:
         candidates: list[dict[str, Any]] = []
         seen: set[str] = set()
+        manifest_names = ("server.json", "manifest.json", "mcp.json")
         for root in self._resolved_mcp_roots():
             for path in sorted(root.rglob("*")):
                 if not path.is_file():
                     continue
-                if path.name.lower() not in {"readme.md", "manifest.json", "server.json"}:
+                if path.name.lower() not in {*manifest_names, "readme.md"}:
                     continue
                 entry_id = path.parent.name
                 if entry_id in seen:
                     continue
                 seen.add(entry_id)
                 text = self._read_source_text(path)
+
+                # Prefer a friendly name persisted in the canonical manifest
+                display_name = entry_id
+                manifest_path: Path | None = None
+                for name in manifest_names:
+                    candidate = path.parent / name
+                    if candidate.exists():
+                        manifest_path = candidate
+                        break
+                if manifest_path is not None:
+                    try:
+                        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+                        if manifest.get("name"):
+                            display_name = str(manifest["name"])
+                    except Exception:
+                        pass
+
                 candidates.append(
                     {
                         "id": entry_id,
-                        "name": entry_id,
+                        "name": display_name,
                         "source_path": str(path),
                         "source_hash": sha256_file(path),
                         "source_text": text,
@@ -388,17 +594,28 @@ class LibraryRegistryService:
             return []
         return registry.items if registry.kind == kind else []
 
+    def _app_installed_capabilities_root(self, kind: LibraryKind) -> Path:
+        return Path(self.settings.data_root) / "_system" / "capabilities" / ("skills" if kind == "skill" else "mcp")
+
     def _resolved_skill_roots(self) -> list[Path]:
         if self.skill_roots is not None:
-            return [path for path in self.skill_roots if path.exists()]
-        roots = [Path.home() / ".codex" / "skills", Path.home() / ".agents" / "skills"]
-        return [path for path in roots if path.exists()]
+            roots = [path for path in self.skill_roots if path.exists()]
+        else:
+            roots = [path for path in [Path.home() / ".codex" / "skills", Path.home() / ".agents" / "skills"] if path.exists()]
+        app_installed = self._app_installed_capabilities_root("skill")
+        if app_installed.exists() and app_installed not in roots:
+            roots.append(app_installed)
+        return roots
 
     def _resolved_mcp_roots(self) -> list[Path]:
         if self.mcp_roots is not None:
-            return [path for path in self.mcp_roots if path.exists()]
-        roots = [Path.home() / ".codex" / "mcp", Path.home() / ".agents" / "mcp"]
-        return [path for path in roots if path.exists()]
+            roots = [path for path in self.mcp_roots if path.exists()]
+        else:
+            roots = [path for path in [Path.home() / ".codex" / "mcp", Path.home() / ".agents" / "mcp"] if path.exists()]
+        app_installed = self._app_installed_capabilities_root("mcp")
+        if app_installed.exists() and app_installed not in roots:
+            roots.append(app_installed)
+        return roots
 
     @staticmethod
     def _read_source_text(path: Path) -> str:
@@ -580,6 +797,82 @@ class LibraryRegistryService:
     def _normalize_text(value: str) -> str:
         return " ".join(WORD_RE.findall(value.lower()))
 
+    @staticmethod
+    def _build_match_reason(
+        entry: LibraryEntry,
+        query_terms: list[str],
+        runtime_filter: str,
+        tag_filters: set[str],
+    ) -> str:
+        """Build a human-readable match reason from query/filter hits."""
+        norm = LibraryRegistryService._normalize_text
+        parts: list[str] = []
+        norm_name = norm(entry.name)
+        name_hits = [t for t in query_terms if t in norm_name]
+        if name_hits:
+            parts.append(f"name: {', '.join(name_hits)}")
+        norm_aliases = " ".join(entry.aliases).lower()
+        alias_hits = [t for t in query_terms if t in norm_aliases]
+        if alias_hits:
+            parts.append(f"aliases: {', '.join(alias_hits)}")
+        norm_summary = norm(entry.summary_short or "")
+        summary_hits = [t for t in query_terms if t in norm_summary]
+        if summary_hits:
+            parts.append(f"summary: {', '.join(summary_hits)}")
+        entry_tag_norms = {norm(t) for t in entry.tags}
+        tag_hits = tag_filters & entry_tag_norms
+        if tag_hits:
+            parts.append(f"tags: {', '.join(tag_hits)}")
+        if runtime_filter:
+            runtime_norms = {
+                norm(r)
+                for r in [*entry.supported_runtimes, *entry.runtime_requirements]
+                if norm(r)
+            }
+            if runtime_filter in runtime_norms:
+                parts.append(f"runtime: {runtime_filter}")
+        return "; ".join(parts) if parts else "broad match"
+
+    @staticmethod
+    def _serialize_search_entry(item: LibraryEntry, *, match_reason: str = "broad match") -> dict[str, Any]:
+        return {
+            "id": item.id,
+            "kind": item.kind,
+            "name": item.name,
+            "summary_short": item.summary_short,
+            "match_reason": match_reason,
+            "supported_runtimes": list(item.supported_runtimes),
+            "enabled": item.enabled,
+        }
+
+    @staticmethod
+    def _serialize_detail_entry(item: LibraryEntry) -> dict[str, Any]:
+        return {
+            "id": item.id,
+            "kind": item.kind,
+            "name": item.name,
+            "summary_short": item.summary_short,
+            "summary_long": item.summary_long,
+            "use_cases": list(item.use_cases),
+            "compatibility_notes": list(item.compatibility_notes),
+            "supported_runtimes": list(item.supported_runtimes),
+            "runtime_requirements": list(item.runtime_requirements),
+            "launch_hint": item.launch_hint,
+            "enabled": item.enabled,
+            "source_kind": LibraryRegistryService._compute_source_kind(item),
+        }
+
+    @staticmethod
+    def _compute_source_kind(item: LibraryEntry) -> str:
+        sp = item.source_path or ""
+        if "/_system/capabilities/" in sp:
+            return "app-installed"
+        if "/.codex/" in sp or "/.agents/" in sp:
+            return "system"
+        if sp:
+            return "system"
+        return "system"
+
     def _score_entry(
         self,
         entry: LibraryEntry,
@@ -595,6 +888,7 @@ class LibraryRegistryService:
                 entry.summary_long.lower(),
                 " ".join(entry.tags).lower(),
                 " ".join(entry.use_cases).lower(),
+                " ".join(entry.aliases).lower(),
             ]
         )
         if compact_query:
@@ -603,10 +897,16 @@ class LibraryRegistryService:
             for term in query_terms:
                 if term in haystack:
                     matched += 1
-            score += matched * 1.4
+            # Also check aliases (not in haystack to avoid inflating phrase-match)
+            alias_haystack = " ".join(entry.aliases).lower()
+            alias_matched = 0
+            for term in query_terms:
+                if term in alias_haystack:
+                    alias_matched += 1
+            score += matched * 1.4 + alias_matched * 1.2
             if compact_query in haystack:
                 score += 1.8
-            if matched == 0:
+            if matched == 0 and alias_matched == 0:
                 return 0.0
         if runtime_filter:
             runtime_terms = {
@@ -630,7 +930,13 @@ class LibraryRegistryService:
     def _serialize_entry(item: LibraryEntry) -> dict[str, Any]:
         payload = item.model_dump()
         payload["summary"] = item.summary_short
-        payload["source"] = item.source_path
+        payload["source_kind"] = LibraryRegistryService._compute_source_kind(item)
+        # Do not expose raw host path via source field
+        payload.pop("source_path", None)
+        payload.pop("source_hash", None)
+        payload.pop("generated_by", None)
+        payload.pop("generated_at", None)
+        payload.pop("metadata", None)
         return payload
 
     @staticmethod
@@ -656,23 +962,258 @@ class LibraryRegistryService:
                 return runtime
         return item.supported_runtimes[0] if item.supported_runtimes else requested_runtime
 
+    def install_skill_from_directory(
+        self,
+        source_dir: Path,
+        *,
+        target_id: str | None = None,
+        overwrite: bool = False,
+    ) -> dict[str, Any]:
+        """Install a skill from a local directory into the app-managed capabilities root."""
+        source_dir = source_dir.resolve()
+        if not source_dir.exists():
+            raise ValueError(f"Source path does not exist: {source_dir}")
+        if not source_dir.is_dir():
+            raise ValueError("Source must be a directory")
+        if not (source_dir / "SKILL.md").exists():
+            raise ValueError("Skill source must contain a SKILL.md file")
+
+        installed_id = self._validate_capability_id(target_id or source_dir.name)
+        with self._install_lock("skill", installed_id):
+            cap_root = self._app_installed_capabilities_root("skill")
+            dest = cap_root / installed_id
+            self._assert_within_root(dest, cap_root)
+
+            if dest.exists() and not overwrite:
+                raise FileExistsError(f"Target already exists: {dest}")
+
+            tmp_dest = self._prepare_temp_dest(dest)
+            try:
+                shutil.copytree(source_dir, tmp_dest)
+                self._commit_temp_dest(tmp_dest, dest)
+            except Exception:
+                if tmp_dest.exists():
+                    shutil.rmtree(tmp_dest)
+                raise
+
+            entry = self._build_single_skill_entry(dest, installed_id)
+            self._add_or_replace_entry("skill", entry)
+
+        return {
+            "ok": True,
+            "kind": "skill",
+            "installed_id": installed_id,
+            "installed_name": entry.name,
+            "summary": f"Skill '{entry.name}' installed and available.",
+            "warnings": [],
+        }
+
+    def register_mcp_server(
+        self,
+        server_id: str,
+        name: str,
+        transport: str,
+        *,
+        command: str | None = None,
+        args: list[str] | None = None,
+        env: dict[str, str] | None = None,
+        url: str | None = None,
+        headers: dict[str, str] | None = None,
+        overwrite: bool = False,
+    ) -> dict[str, Any]:
+        """Register an MCP server by writing a server.json config under the app-managed MCP root."""
+        if transport not in {"stdio", "http", "sse"}:
+            raise ValueError("transport must be 'stdio', 'http', or 'sse'")
+        if transport == "stdio":
+            if not command:
+                raise ValueError("command is required for stdio transport")
+        else:
+            if not url:
+                raise ValueError("url is required for http/sse transport")
+
+        server_id = self._validate_capability_id(server_id)
+        with self._install_lock("mcp", server_id):
+            cap_root = self._app_installed_capabilities_root("mcp")
+            dest = cap_root / server_id
+            self._assert_within_root(dest, cap_root)
+
+            if dest.exists() and not overwrite:
+                raise FileExistsError(f"Target already exists: {dest}")
+
+            server_config: dict[str, Any]
+            if transport == "stdio":
+                server_config = {"command": command}
+                if args:
+                    server_config["args"] = args
+                if env:
+                    server_config["env"] = env
+            else:
+                server_config = {"type": transport, "url": url}
+                if headers:
+                    server_config["headers"] = headers
+            server_config["name"] = name
+
+            tmp_dest = self._prepare_temp_dest(dest)
+            try:
+                tmp_dest.mkdir(parents=True)
+                (tmp_dest / "server.json").write_text(
+                    json.dumps(server_config, ensure_ascii=False, indent=2) + "\n", encoding="utf-8"
+                )
+                self._commit_temp_dest(tmp_dest, dest)
+            except Exception:
+                if tmp_dest.exists():
+                    shutil.rmtree(tmp_dest)
+                raise
+
+            entry = self._build_single_mcp_entry(dest / "server.json")
+            self._add_or_replace_entry("mcp", entry)
+
+        return {
+            "ok": True,
+            "kind": "mcp",
+            "installed_id": server_id,
+            "installed_name": entry.name,
+            "summary": f"MCP server '{entry.name}' registered and available.",
+            "warnings": [],
+        }
+
+    def install_mcp_from_directory(
+        self,
+        source_dir: Path,
+        *,
+        target_id: str | None = None,
+        overwrite: bool = False,
+    ) -> dict[str, Any]:
+        """Install an MCP server from a local directory into the app-managed capabilities root."""
+        source_dir = source_dir.resolve()
+        if not source_dir.exists():
+            raise ValueError(f"Source path does not exist: {source_dir}")
+        if not source_dir.is_dir():
+            raise ValueError("Source must be a directory")
+
+        manifest_order = ["server.json", "manifest.json", "mcp.json"]
+        manifest_path: Path | None = None
+        for name in manifest_order:
+            candidate = source_dir / name
+            if candidate.exists():
+                manifest_path = candidate
+                break
+        if manifest_path is None:
+            raise ValueError(
+                "MCP source must contain at least one of: server.json, manifest.json, mcp.json"
+            )
+
+        installed_id = self._validate_capability_id(target_id or source_dir.name)
+        with self._install_lock("mcp", installed_id):
+            cap_root = self._app_installed_capabilities_root("mcp")
+            dest = cap_root / installed_id
+            self._assert_within_root(dest, cap_root)
+
+            if dest.exists() and not overwrite:
+                raise FileExistsError(f"Target already exists: {dest}")
+
+            tmp_dest = self._prepare_temp_dest(dest)
+            try:
+                shutil.copytree(source_dir, tmp_dest)
+                self._commit_temp_dest(tmp_dest, dest)
+            except Exception:
+                if tmp_dest.exists():
+                    shutil.rmtree(tmp_dest)
+                raise
+
+            installed_manifest = next(
+                (dest / name for name in manifest_order if (dest / name).exists()),
+                dest / manifest_order[0],
+            )
+            entry = self._build_single_mcp_entry(installed_manifest)
+            entry.id = installed_id
+            if entry.name == manifest_path.parent.name:
+                entry.name = installed_id
+            self._add_or_replace_entry("mcp", entry)
+
+        return {
+            "ok": True,
+            "kind": "mcp",
+            "installed_id": installed_id,
+            "installed_name": entry.name,
+            "summary": f"MCP '{entry.name}' installed and available.",
+            "warnings": [],
+        }
+
     @staticmethod
     def _build_mcp_config(
         item: LibraryEntry,
         selected_runtime: str | None,
         runtimes_by_name: dict[str, dict[str, Any]],
     ) -> dict[str, Any] | None:
-        if item.id != "omicverse":
-            return None
-        runtime = runtimes_by_name.get(selected_runtime or "omicverse", {})
-        python_path = runtime.get("path")
-        if not python_path:
-            return None
-        return {
-            "mcpServers": {
-                item.id: {
-                    "command": python_path,
-                    "args": ["-m", "omicverse.mcp", "--phase", "P0"],
+        """Build MCP config from manifest.json/server.json or fallback to runtime profile."""
+        # 1. Try to read server.json / manifest.json / mcp.json from source directory
+        manifest_data: dict[str, Any] | None = None
+        if item.source_path:
+            source_path = Path(item.source_path)
+            for manifest_name in ("server.json", "manifest.json", "mcp.json"):
+                candidate = source_path.parent / manifest_name
+                if candidate.exists():
+                    try:
+                        manifest_data = json.loads(candidate.read_text(encoding="utf-8"))
+                        break
+                    except (OSError, json.JSONDecodeError):
+                        continue
+
+        # 2. If manifest found, parse generic fields
+        if manifest_data:
+            # Some manifests nest under "mcpServers"; unwrap if present
+            if "mcpServers" in manifest_data and isinstance(manifest_data["mcpServers"], dict):
+                # If manifest has nested mcpServers, extract the first server config
+                servers = manifest_data["mcpServers"]
+                first_key = next(iter(servers), None)
+                if first_key:
+                    manifest_data = servers[first_key]
+
+            # 2a. Remote transport: url-based config
+            server_type = str(manifest_data.get("type") or "").strip().lower()
+            url = str(manifest_data.get("url") or "").strip()
+            headers = dict(manifest_data.get("headers") or {})
+            if server_type in {"http", "sse"} and url:
+                server_config: dict[str, Any] = {"url": url}
+                if headers:
+                    server_config["headers"] = headers
+                return {"mcpServers": {item.id: server_config}}
+
+            # 2b. Stdio transport: command-based config
+            command = str(manifest_data.get("command") or "").strip()
+            args = list(manifest_data.get("args") or [])
+            env = dict(manifest_data.get("env") or {})
+
+            if not command:
+                # Manifest exists but lacks a valid command; continue to fallback
+                manifest_data = None
+            else:
+                # Resolve Python runtime path when command is a generic Python interpreter
+                if command in {"python", "python3", "py"}:
+                    runtime = runtimes_by_name.get(selected_runtime or "", {})
+                    python_path = runtime.get("path")
+                    if python_path:
+                        command = python_path
+
+                server_config = {"command": command, "args": args}
+                if env:
+                    server_config["env"] = env
+                return {"mcpServers": {item.id: server_config}}
+
+        # 3. Fallback to omicverse runtime profile special case
+        if item.id == "omicverse":
+            runtime = runtimes_by_name.get(selected_runtime or "omicverse", {})
+            python_path = runtime.get("path")
+            if not python_path:
+                return None
+            return {
+                "mcpServers": {
+                    item.id: {
+                        "command": python_path,
+                        "args": ["-m", "omicverse.mcp", "--phase", "P0"],
+                    }
                 }
             }
-        }
+
+        return None

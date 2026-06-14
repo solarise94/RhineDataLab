@@ -11,6 +11,7 @@ results/**/*.fq
 
 # Local/runtime noise
 .DS_Store
+.tmp/
 .venv/
 frontend/node_modules/
 frontend/.next/

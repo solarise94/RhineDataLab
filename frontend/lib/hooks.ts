@@ -4,7 +4,14 @@ import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 
 import { api } from "@/lib/api";
 import { queryKeys } from "@/lib/query-keys";
-import { CreateProjectPayload } from "@/lib/types";
+import {
+  CreateProjectPayload,
+  InstantiateBlueprintRequest,
+  ProjectDraftListResponse,
+  ProjectDraftResponse,
+  BlueprintReviewResult,
+  UpdateProjectDraftRequest,
+} from "@/lib/types";
 
 export function useProjects() {
   return useQuery({
@@ -24,6 +31,57 @@ export function useLibrary(kind: "skill" | "mcp") {
   return useQuery({
     queryKey: queryKeys.library(kind),
     queryFn: () => api.getLibrary(kind),
+  });
+}
+
+export function useProjectSkillLibrary(projectId: string) {
+  return useQuery({
+    queryKey: queryKeys.projectSkillLibrary(projectId),
+    queryFn: () => api.getSkillLibrary(projectId),
+  });
+}
+
+export function useProjectMcpLibrary(projectId: string) {
+  return useQuery({
+    queryKey: queryKeys.projectMcpLibrary(projectId),
+    queryFn: () => api.getMcpLibrary(projectId),
+  });
+}
+
+export function useInstallCapabilityMutation(projectId: string) {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: (payload: Parameters<typeof api.installProjectCapability>[1]) =>
+      api.installProjectCapability(projectId, payload),
+    onSuccess: async (_data, variables) => {
+      if (variables.kind === "skill") {
+        await queryClient.invalidateQueries({ queryKey: queryKeys.projectSkillLibrary(projectId) });
+      } else {
+        await queryClient.invalidateQueries({ queryKey: queryKeys.projectMcpLibrary(projectId) });
+      }
+    },
+  });
+}
+
+export function useUploadSkillMutation(projectId: string) {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: ({ file, overwrite }: { file: File; overwrite?: boolean }) =>
+      api.uploadProjectSkill(projectId, file, overwrite),
+    onSuccess: async () => {
+      await queryClient.invalidateQueries({ queryKey: queryKeys.projectSkillLibrary(projectId) });
+    },
+  });
+}
+
+export function useRegisterMcpServerMutation(projectId: string) {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: (payload: Parameters<typeof api.registerProjectMcpServer>[1]) =>
+      api.registerProjectMcpServer(projectId, payload),
+    onSuccess: async () => {
+      await queryClient.invalidateQueries({ queryKey: queryKeys.projectMcpLibrary(projectId) });
+    },
   });
 }
 
@@ -66,26 +124,6 @@ export function useDeleteExecutorProfileMutation() {
     mutationFn: (profileId: string) => api.deleteExecutorProfile(profileId),
     onSuccess: async () => {
       await queryClient.invalidateQueries({ queryKey: queryKeys.executorProfiles });
-    },
-  });
-}
-
-export function useRefreshLibraryMutation(kind: "skill" | "mcp") {
-  const queryClient = useQueryClient();
-  return useMutation({
-    mutationFn: ({ force }: { force?: boolean } = {}) => api.refreshLibrary(kind, force ?? false),
-    onSuccess: async () => {
-      await queryClient.invalidateQueries({ queryKey: queryKeys.library(kind) });
-    },
-  });
-}
-
-export function useResummarizeLibraryItemMutation(kind: "skill" | "mcp") {
-  const queryClient = useQueryClient();
-  return useMutation({
-    mutationFn: (entryId: string) => api.resummarizeLibraryItem(kind, entryId),
-    onSuccess: async () => {
-      await queryClient.invalidateQueries({ queryKey: queryKeys.library(kind) });
     },
   });
 }
@@ -262,6 +300,128 @@ export function useRuntimeApprovals(projectId: string, runId?: string, runStatus
     queryFn: () => api.getRuntimeApprovals(projectId, runId!),
     enabled: Boolean(runId),
     refetchInterval: runStatus && ["success", "failed", "cancelled", "reviewed"].includes(runStatus) ? false : 4_000,
+  });
+}
+
+// ---------------------------------------------------------------------------
+// Card Library
+// ---------------------------------------------------------------------------
+
+export function useCardLibrary() {
+  return useQuery({
+    queryKey: queryKeys.cardLibrary,
+    queryFn: () => api.getCardLibrary(),
+  });
+}
+
+export function useCardBlueprint(blueprintId: string | null) {
+  return useQuery({
+    queryKey: queryKeys.cardBlueprint(blueprintId ?? ""),
+    queryFn: () => api.getCardBlueprint(blueprintId!),
+    enabled: Boolean(blueprintId),
+  });
+}
+
+export function useSaveCardToLibrary() {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: ({ projectId, cardId }: { projectId: string; cardId: string }) =>
+      api.saveCardToLibrary(projectId, cardId),
+    onSuccess: async () => {
+      await queryClient.invalidateQueries({ queryKey: queryKeys.cardLibrary });
+    },
+  });
+}
+
+export function useDeleteCardBlueprint() {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: (blueprintId: string) => api.deleteCardBlueprint(blueprintId),
+    onSuccess: async () => {
+      await queryClient.invalidateQueries({ queryKey: queryKeys.cardLibrary });
+    },
+  });
+}
+
+export function useInstantiateCardBlueprint(projectId: string) {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: ({ blueprintId, payload }: { blueprintId: string; payload: InstantiateBlueprintRequest }) =>
+      api.instantiateCardBlueprint(projectId, blueprintId, payload),
+    onSuccess: async () => {
+      await queryClient.invalidateQueries({ queryKey: queryKeys.project(projectId) });
+    },
+  });
+}
+
+export function useProjectCardLibrary(projectId: string) {
+  return useQuery<ProjectDraftListResponse>({
+    queryKey: queryKeys.projectCardLibrary(projectId),
+    queryFn: () => api.getProjectCardLibrary(projectId),
+  });
+}
+
+export function useAddCardToProjectLibrary() {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: ({ projectId, cardId }: { projectId: string; cardId: string }) =>
+      api.addCardToProjectLibrary(projectId, cardId),
+    onSuccess: async (_data, variables) => {
+      await queryClient.invalidateQueries({ queryKey: queryKeys.projectCardLibrary(variables.projectId) });
+    },
+  });
+}
+
+export function useProjectCardDraft(projectId: string, draftId: string | null) {
+  return useQuery<ProjectDraftResponse>({
+    queryKey: queryKeys.projectCardDraft(projectId, draftId ?? ""),
+    queryFn: () => api.getProjectCardDraft(projectId, draftId!),
+    enabled: Boolean(draftId),
+  });
+}
+
+export function useReviewProjectCardDraft(projectId: string) {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: (draftId: string) => api.reviewProjectCardDraft(projectId, draftId),
+    onSuccess: async (_data, draftId) => {
+      await queryClient.invalidateQueries({ queryKey: queryKeys.projectCardLibrary(projectId) });
+      await queryClient.invalidateQueries({ queryKey: queryKeys.projectCardDraft(projectId, draftId) });
+    },
+  });
+}
+
+export function usePublishProjectCardDraft(projectId: string) {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: (draftId: string) => api.publishProjectCardDraft(projectId, draftId),
+    onSuccess: async (_data, draftId) => {
+      await queryClient.invalidateQueries({ queryKey: queryKeys.projectCardLibrary(projectId) });
+      await queryClient.invalidateQueries({ queryKey: queryKeys.projectCardDraft(projectId, draftId) });
+      await queryClient.invalidateQueries({ queryKey: queryKeys.cardLibrary });
+    },
+  });
+}
+
+export function useUpdateProjectCardDraft(projectId: string) {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: ({ draftId, payload }: { draftId: string; payload: UpdateProjectDraftRequest }) =>
+      api.updateProjectCardDraft(projectId, draftId, payload),
+    onSuccess: async (_data, variables) => {
+      await queryClient.invalidateQueries({ queryKey: queryKeys.projectCardLibrary(projectId) });
+      await queryClient.invalidateQueries({ queryKey: queryKeys.projectCardDraft(projectId, variables.draftId) });
+    },
+  });
+}
+
+export function useDeleteProjectCardDraft(projectId: string) {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: (draftId: string) => api.deleteProjectCardDraft(projectId, draftId),
+    onSuccess: async () => {
+      await queryClient.invalidateQueries({ queryKey: queryKeys.projectCardLibrary(projectId) });
+    },
   });
 }
 

@@ -44,6 +44,7 @@ class ManagerService:
         library_registry_service: LibraryRegistryService | None = None,
         manager_auto_service: ManagerAutoService | None = None,
         background_workboard_service: BackgroundWorkboardService | None = None,
+        package_service: Any | None = None,
     ) -> None:
         self.project_service = project_service
         self._uses_default_planner = planner is None
@@ -60,6 +61,7 @@ class ManagerService:
             runtime_dependency_resolver_service=runtime_dependency_resolver_service,
             library_registry_service=library_registry_service,
             background_workboard_service=background_workboard_service,
+            package_service=package_service,
         )
 
     def chat(self, project_id: str, request: ChatRequest) -> ChatResponse:
