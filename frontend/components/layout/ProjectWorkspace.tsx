@@ -70,20 +70,12 @@ const CapabilitiesPanel = dynamic(
   () => import("@/components/capabilities/CapabilitiesPanel").then((m) => m.CapabilitiesPanel),
   { ssr: false },
 );
-const BlueprintDeckPanel = dynamic(
-  () => import("@/components/card-library/BlueprintDeckPanel").then((m) => m.BlueprintDeckPanel),
-  { ssr: false },
-);
-const ProjectDeckPanel = dynamic(
-  () => import("@/components/card-library/ProjectDeckPanel").then((m) => m.ProjectDeckPanel),
-  { ssr: false },
-);
-const CardLibraryPage = dynamic(
-  () => import("@/components/card-library/CardLibraryPage").then((m) => m.CardLibraryPage),
+const AnalysisCardPage = dynamic(
+  () => import("@/components/card-library/AnalysisCardPage").then((m) => m.AnalysisCardPage),
   { ssr: false },
 );
 
-type View = "tasks" | "results" | "files" | "report" | "advanced" | "capabilities" | "settings" | "card-library" | "global-card-library";
+type View = "tasks" | "results" | "files" | "report" | "advanced" | "capabilities" | "settings" | "card-library";
 const EMPTY_CARD_INTERACTION_ORDER: string[] = [];
 
 const PAGE_INTRO: Record<Exclude<View, "tasks">, string> = {
@@ -93,8 +85,7 @@ const PAGE_INTRO: Record<Exclude<View, "tasks">, string> = {
   capabilities: "浏览项目已安装的 Skill 与 MCP 能力，或从本地路径安装新的能力。",
   settings: "配置项目运行时偏好、API 供应商、角色绑定和诊断选项。",
   advanced: "查看项目图结构、Git 历史、运行时诊断和卡片详情。",
-  "card-library": "管理项目牌库，审查并把可复用的分析牌发布到全局牌库。",
-  "global-card-library": "浏览和管理全局可复用分析牌，删除或查看详情。",
+  "card-library": "管理分析卡：审查并发布可复用分析卡到全局分析卡库，管理参考数据依赖。",
 };
 
 function useMediaQuery(query: string) {
@@ -831,9 +822,7 @@ export function ProjectWorkspace({ projectId, view }: { projectId: string; view:
                 : view === "settings"
                 ? "工作台设置"
                 : view === "card-library"
-                ? "项目牌库"
-                : view === "global-card-library"
-                ? "全局牌库"
+                ? "分析卡"
                 : "技术详情"
             }
           />
@@ -948,9 +937,7 @@ export function ProjectWorkspace({ projectId, view }: { projectId: string; view:
               readOnly={autoLocked}
             />
           ) : view === "card-library" ? (
-            <ProjectDeckPanel projectId={projectId} />
-          ) : view === "global-card-library" ? (
-            <CardLibraryPage embedded />
+            <AnalysisCardPage projectId={projectId} />
           ) : null}
         </div>
         ) : null}
@@ -1084,9 +1071,7 @@ export function ProjectWorkspace({ projectId, view }: { projectId: string; view:
                   readOnly={autoLocked}
                 />
               ) : view === "card-library" ? (
-                <ProjectDeckPanel projectId={projectId} />
-              ) : view === "global-card-library" ? (
-                <CardLibraryPage embedded />
+                <AnalysisCardPage projectId={projectId} />
               ) : null}
             </div>
           ) : null}

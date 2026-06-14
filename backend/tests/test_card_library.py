@@ -1,4 +1,4 @@
-"""Tests for the Card Library (牌库) system.
+"""Tests for the Card Library (分析卡库) system.
 
 Covers:
 - Blueprint CRUD (save from card, import, update, delete, get, list, search).

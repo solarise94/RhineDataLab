@@ -11,8 +11,9 @@ import {
   usePublishProjectCardDraft,
   useDeleteProjectCardDraft,
   useUpdateProjectCardDraft,
+  useReferenceData,
 } from "@/lib/hooks";
-import { DraftStatus, CardBlueprintDraftIndexEntry, UpdateProjectDraftRequest } from "@/lib/types";
+import { DraftStatus, CardBlueprintDraftIndexEntry, ReferenceAssetRef, UpdateProjectDraftRequest } from "@/lib/types";
 import { BlueprintCard } from "./BlueprintCard";
 import { BlueprintDetailPanel } from "./BlueprintDetailPanel";
 import { useCardExpansion, useIsomorphicLayoutEffect } from "./useCardExpansion";
@@ -29,6 +30,8 @@ const STATUS_OPTIONS: { value: DraftStatus | ""; label: string }[] = [
 export function ProjectDeckPanel({ projectId }: { projectId: string }) {
   const searchParams = useSearchParams();
   const { data, isLoading, isError } = useProjectCardLibrary(projectId);
+  const referenceDataQuery = useReferenceData();
+  const referenceEntries = referenceDataQuery.data?.entries ?? [];
   const [searchQuery, setSearchQuery] = useState("");
   const [domainFilter, setDomainFilter] = useState("");
   const [runtimeFilter, setRuntimeFilter] = useState("");
@@ -111,6 +114,8 @@ export function ProjectDeckPanel({ projectId }: { projectId: string }) {
       instruction_blocks: bp.instruction_blocks,
       python_packages: py,
       r_packages: r,
+      use_cases: bp.use_cases,
+      reference_assets: bp.reference_assets,
     });
   }, [isEditing, draftQuery.data?.draft.blueprint]);
 
@@ -171,6 +176,10 @@ export function ProjectDeckPanel({ projectId }: { projectId: string }) {
       tags: editForm.tags?.map((t) => t.trim()).filter(Boolean),
       python_packages: editForm.python_packages?.map((p) => p.trim()).filter(Boolean),
       r_packages: editForm.r_packages?.map((p) => p.trim()).filter(Boolean),
+      use_cases: editForm.use_cases?.map((t) => t.trim()).filter(Boolean),
+      reference_assets: (editForm.reference_assets ?? [])
+        .filter((r) => r.ref_id && r.role.trim())
+        .map((r) => ({ ref_id: r.ref_id, role: r.role.trim(), required: r.required, description: r.description?.trim() || null })),
     };
     updateMutation.mutate(
       { draftId: selectedDraftId, payload },
@@ -199,7 +208,7 @@ export function ProjectDeckPanel({ projectId }: { projectId: string }) {
     if (!selectedDraftId) return;
     publishMutation.mutate(selectedDraftId, {
       onSuccess: () => {
-        showToast("已发布到全局牌库", "success");
+        showToast("已发布到全局分析卡库", "success");
         collapse();
       },
       onError: () => showToast("发布失败", "error"),
@@ -305,6 +314,82 @@ export function ProjectDeckPanel({ projectId }: { projectId: string }) {
               style={{ padding: "8px 10px", borderRadius: 6, border: "1px solid var(--line)", background: "var(--bg)", color: "var(--text)" }}
             />
           </label>
+          <label style={{ display: "grid", gap: 4, fontSize: 12 }}>
+            <span style={{ fontWeight: 600 }}>使用场景（每行一条，供 manager 检索复用）</span>
+            <textarea
+              value={editForm.use_cases?.join("\n") ?? ""}
+              onChange={(e) => setEditForm((prev) => ({ ...prev, use_cases: e.target.value.split("\n").map((t) => t.trim()).filter(Boolean) }))}
+              rows={3}
+              style={{ padding: "8px 10px", borderRadius: 6, border: "1px solid var(--line)", background: "var(--bg)", color: "var(--text)", resize: "vertical" }}
+            />
+          </label>
+          <div style={{ display: "grid", gap: 6, fontSize: 12 }}>
+            <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
+              <span style={{ fontWeight: 600 }}>参考数据依赖（环境级，如 GTF）</span>
+              <button
+                type="button"
+                className="btn secondary"
+                style={{ fontSize: 11, padding: "2px 8px" }}
+                onClick={() => setEditForm((prev) => ({
+                  ...prev,
+                  reference_assets: [...(prev.reference_assets ?? []), { ref_id: "", role: "", required: true, description: null } as ReferenceAssetRef],
+                }))}
+              >
+                + 添加
+              </button>
+            </div>
+            {(editForm.reference_assets ?? []).map((ref, idx) => (
+              <div key={idx} style={{ display: "grid", gridTemplateColumns: "1.4fr 1fr auto auto", gap: 6, alignItems: "center" }}>
+                <select
+                  value={ref.ref_id}
+                  onChange={(e) => setEditForm((prev) => {
+                    const arr = [...(prev.reference_assets ?? [])];
+                    arr[idx] = { ...arr[idx], ref_id: e.target.value };
+                    return { ...prev, reference_assets: arr };
+                  })}
+                  style={{ padding: "6px 8px", borderRadius: 6, border: "1px solid var(--line)", background: "var(--bg)", color: "var(--text)" }}
+                >
+                  <option value="">选择参考数据…</option>
+                  {referenceEntries.map((rd) => (
+                    <option key={rd.ref_id} value={rd.ref_id}>{rd.name} · {rd.kind}</option>
+                  ))}
+                </select>
+                <input
+                  placeholder="role，如 gene_annotation"
+                  value={ref.role}
+                  onChange={(e) => setEditForm((prev) => {
+                    const arr = [...(prev.reference_assets ?? [])];
+                    arr[idx] = { ...arr[idx], role: e.target.value };
+                    return { ...prev, reference_assets: arr };
+                  })}
+                  style={{ padding: "6px 8px", borderRadius: 6, border: "1px solid var(--line)", background: "var(--bg)", color: "var(--text)" }}
+                />
+                <label style={{ fontSize: 11, display: "flex", alignItems: "center", gap: 3, whiteSpace: "nowrap" }}>
+                  <input
+                    type="checkbox"
+                    checked={ref.required}
+                    onChange={(e) => setEditForm((prev) => {
+                      const arr = [...(prev.reference_assets ?? [])];
+                      arr[idx] = { ...arr[idx], required: e.target.checked };
+                      return { ...prev, reference_assets: arr };
+                    })}
+                  />
+                  必需
+                </label>
+                <button
+                  type="button"
+                  onClick={() => setEditForm((prev) => ({ ...prev, reference_assets: (prev.reference_assets ?? []).filter((_, i) => i !== idx) }))}
+                  style={{ background: "none", border: "none", cursor: "pointer", color: "var(--red)", display: "flex", alignItems: "center" }}
+                  title="移除"
+                >
+                  <Trash2 size={13} />
+                </button>
+              </div>
+            ))}
+            {referenceEntries.length === 0 && (
+              <span style={{ color: "var(--muted)" }}>参考数据注册表为空，先到"分析卡 → 参考数据"上传。</span>
+            )}
+          </div>
         </div>
       </>
     ) : (
@@ -334,7 +419,7 @@ export function ProjectDeckPanel({ projectId }: { projectId: string }) {
             disabled={anyLoading || selectedEntry.status !== "approved"}
           >
             {publishMutation.isPending ? <Loader2 size={14} className="spin" /> : null}
-            发布到全局牌库
+            发布到全局分析卡库
           </button>
           <button
             type="button"
@@ -360,15 +445,15 @@ export function ProjectDeckPanel({ projectId }: { projectId: string }) {
     <div className="card-library-page">
       <div className="card-library-header">
         <div>
-          <h2 style={{ margin: 0, fontSize: 18, fontWeight: 700 }}>项目牌库</h2>
-          <p style={{ margin: 0, color: "var(--muted)", fontSize: 12 }}>把项目 card 泛化审查后发布到全局牌库</p>
+          <h2 style={{ margin: 0, fontSize: 18, fontWeight: 700 }}>项目分析卡（草稿）</h2>
+          <p style={{ margin: 0, color: "var(--muted)", fontSize: 12 }}>把项目 card 泛化审查后发布到全局分析卡库</p>
         </div>
         <div style={{ display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap" }}>
           <div className="search-input-wrap">
             <Search size={14} style={{ color: "var(--muted)", flexShrink: 0 }} />
             <input
               type="text"
-              placeholder="搜索项目牌库…"
+              placeholder="搜索草稿…"
               value={searchQuery}
               onChange={(e) => setSearchQuery(e.target.value)}
             />
@@ -446,12 +531,12 @@ export function ProjectDeckPanel({ projectId }: { projectId: string }) {
       )}
 
       <div className="card-library-content" onClick={handleContentClick}>
-        {isLoading && <div className="empty-state">加载项目牌库…</div>}
-        {isError && <div className="empty-state" style={{ color: "var(--red)" }}>项目牌库加载失败</div>}
+        {isLoading && <div className="empty-state">加载草稿…</div>}
+        {isError && <div className="empty-state" style={{ color: "var(--red)" }}>草稿加载失败</div>}
         {!isLoading && !isError && filtered.length === 0 && (
           <div className="empty-state">
             <Layers size={32} style={{ color: "var(--muted)", marginBottom: 8 }} />
-            <p>{entries.length === 0 ? "项目牌库为空。从卡片详情或模块卡片把 card 加入项目牌库。" : "没有匹配的牌"}</p>
+            <p>{entries.length === 0 ? "草稿为空。从卡片详情或模块卡片把 card 加入草稿。" : "没有匹配的卡"}</p>
           </div>
         )}
         {!isLoading && !isError && filtered.length > 0 && (

@@ -134,8 +134,8 @@ export function CardLibraryPage({ embedded = false }: { embedded?: boolean }) {
             </Link>
           ) : null}
           <div>
-            <h2 style={{ margin: 0, fontSize: 18, fontWeight: 700 }}>Card Library</h2>
-            <p style={{ margin: 0, color: "var(--muted)", fontSize: 12 }}>牌库 — 浏览和管理可复用的分析配置牌</p>
+            <h2 style={{ margin: 0, fontSize: 18, fontWeight: 700 }}>全局分析卡库</h2>
+            <p style={{ margin: 0, color: "var(--muted)", fontSize: 12 }}>全局分析卡库 — 浏览和管理可复用的分析卡</p>
           </div>
         </div>
         <div style={{ display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap" }}>
@@ -143,7 +143,7 @@ export function CardLibraryPage({ embedded = false }: { embedded?: boolean }) {
             <Search size={14} style={{ color: "var(--muted)", flexShrink: 0 }} />
             <input
               type="text"
-              placeholder="搜索牌库…"
+              placeholder="搜索全局分析卡库…"
               value={searchQuery}
               onChange={(e) => setSearchQuery(e.target.value)}
             />
@@ -187,12 +187,12 @@ export function CardLibraryPage({ embedded = false }: { embedded?: boolean }) {
       </div>
 
       <div className="card-library-content" onClick={handleContentClick}>
-        {isLoading && <div className="empty-state">加载牌库…</div>}
-        {isError && <div className="empty-state" style={{ color: "var(--red)" }}>牌库加载失败</div>}
+        {isLoading && <div className="empty-state">加载全局分析卡库…</div>}
+        {isError && <div className="empty-state" style={{ color: "var(--red)" }}>全局分析卡库加载失败</div>}
         {!isLoading && !isError && filtered.length === 0 && (
           <div className="empty-state">
             <Layers size={32} style={{ color: "var(--muted)", marginBottom: 8 }} />
-            <p>{entries.length === 0 ? "还没有牌。完成一个分析项目后，可以把稳定的 card 存入牌库。" : "没有匹配的牌"}</p>
+            <p>{entries.length === 0 ? "还没有分析卡。完成一个分析项目后，可以把稳定的 card 发布到全局分析卡库。" : "没有匹配的卡"}</p>
           </div>
         )}
         {!isLoading && !isError && filtered.length > 0 && (
