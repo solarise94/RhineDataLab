@@ -1,0 +1,14 @@
+name: blueprint-re-r
+channels:
+  - https://mirrors.tuna.tsinghua.edu.cn/anaconda/cloud/conda-forge
+  - https://mirrors.tuna.tsinghua.edu.cn/anaconda/cloud/bioconda
+dependencies:
+  - r-base =4.4
+  - r-tidyverse
+  - r-pheatmap
+  - bioconductor-deseq2
+  - bioconductor-edger
+  - bioconductor-limma
+  - bioconductor-clusterprofiler
+  - bioconductor-org.hs.eg.db
+  - bioconductor-org.mm.eg.db

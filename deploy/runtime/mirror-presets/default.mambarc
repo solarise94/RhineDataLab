@@ -1,0 +1,6 @@
+channels:
+  - conda-forge
+  - bioconda
+default_channels:
+  - defaults
+ssl_verify: true

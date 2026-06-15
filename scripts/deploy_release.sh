@@ -264,6 +264,8 @@ CODEX_BIN="$(find_optional_bin codex)"
 detect_conda_base() {
   local candidates=(
     "${BLUEPRINT_EXECUTOR_CONDA_BASE:-}"
+    "${BLUEPRINT_EXECUTOR_MAMBA_ROOT_PREFIX:-}"
+    "${HOME}/.local/share/blueprint-re/mamba"
     "${CONDA_PREFIX:-}"
     "${HOME}/miniconda3"
     "${HOME}/miniforge3"
@@ -273,7 +275,7 @@ detect_conda_base() {
   local candidate
   for candidate in "${candidates[@]}"; do
     [[ -n "${candidate}" ]] || continue
-    if [[ -x "${candidate}/bin/conda" ]]; then
+    if [[ -x "${candidate}/bin/conda" || -x "${candidate}/bin/micromamba" ]]; then
       printf '%s\n' "${candidate}"
       return 0
     fi
@@ -312,7 +314,7 @@ detect_default_r_runtime() {
     return 0
   fi
   if [[ -n "${conda_base}" ]]; then
-    local candidates=(bioconductor r-bio base)
+    local candidates=(blueprint-re-r bioconductor r-bio base)
     local name
     for name in "${candidates[@]}"; do
       if [[ "${name}" == "base" && -x "${conda_base}/bin/Rscript" ]]; then
@@ -338,6 +340,14 @@ DEFAULT_R_RUNTIME=""
 if CONDA_BASE="$(detect_conda_base 2>/dev/null)"; then
   DEFAULT_PYTHON_RUNTIME="$(detect_default_python_runtime "${CONDA_BASE}" 2>/dev/null || true)"
   DEFAULT_R_RUNTIME="$(detect_default_r_runtime "${CONDA_BASE}" 2>/dev/null || true)"
+  # If the detected base is the bundled micromamba root, derive the bwrap
+  # MAMBA_ROOT_PREFIX/MAMBARC settings unless explicitly configured.
+  if [[ -x "${CONDA_BASE}/bin/micromamba" && -z "${BLUEPRINT_EXECUTOR_MAMBA_ROOT_PREFIX:-}" ]]; then
+    BLUEPRINT_EXECUTOR_MAMBA_ROOT_PREFIX="${CONDA_BASE}"
+    if [[ -f "${CONDA_BASE}/.mambarc" && -z "${BLUEPRINT_EXECUTOR_MAMBARC:-}" ]]; then
+      BLUEPRINT_EXECUTOR_MAMBARC="${CONDA_BASE}/.mambarc"
+    fi
+  fi
 else
   warn_deploy "No conda base detected. Python/R runtime defaults may be empty unless explicitly configured."
   DEFAULT_R_RUNTIME="$(detect_default_r_runtime "" 2>/dev/null || true)"
@@ -417,8 +427,10 @@ check_unknown_blueprint_env_keys() {
     BLUEPRINT_ANTHROPIC_API_BASE_URL
     BLUEPRINT_ANTHROPIC_API_KEY
     BLUEPRINT_BACKEND_API_BASE_URL
+    BLUEPRINT_BIOCONDUCTOR_MIRROR
     BLUEPRINT_CLAUDE_CODE_COMMAND_JSON
     BLUEPRINT_CODEX_COMMAND_JSON
+    BLUEPRINT_CRAN_MIRROR
     BLUEPRINT_DATA_DIRECTORY_ROOTS
     BLUEPRINT_DATA_MOUNT_HASH_LIMIT_BYTES
     BLUEPRINT_DATA_ROOT
@@ -430,6 +442,8 @@ check_unknown_blueprint_env_keys() {
     BLUEPRINT_EXECUTOR_CONDA_BASE
     BLUEPRINT_EXECUTOR_EXTRA_RO_BINDS
     BLUEPRINT_EXECUTOR_HOST_ROOT_READONLY
+    BLUEPRINT_EXECUTOR_MAMBA_ROOT_PREFIX
+    BLUEPRINT_EXECUTOR_MAMBARC
     BLUEPRINT_EXECUTOR_MAX_CONCURRENT_RUNS
     BLUEPRINT_EXECUTOR_MODEL
     BLUEPRINT_EXECUTOR_SANDBOX_MODE
@@ -457,6 +471,7 @@ check_unknown_blueprint_env_keys() {
     BLUEPRINT_PI_EXECUTOR_MODEL
     BLUEPRINT_PI_MANAGER_URL
     BLUEPRINT_PROJECT_ROOTS
+    BLUEPRINT_PYPI_MIRROR
     BLUEPRINT_REVIEWER_API_BASE_URL
     BLUEPRINT_REVIEWER_API_KEY
     BLUEPRINT_REVIEWER_MAX_TOKENS
@@ -484,6 +499,19 @@ check_unknown_blueprint_env_keys() {
 }
 
 check_unknown_blueprint_env_keys
+
+if [[ -z "${BLUEPRINT_CRAN_MIRROR:-}" && -z "${BLUEPRINT_BIOCONDUCTOR_MIRROR:-}" && -z "${BLUEPRINT_PYPI_MIRROR:-}" ]]; then
+  # Installers normally export these; fall back to deriving from the release bundle preset.
+  _mirror_preset="${BLUEPRINT_MIRROR_PRESET:-tsinghua}"
+  _mirror_env_sh="${RELEASE_ROOT}/runtime/mirror-presets/mirror_env.sh"
+  if [[ -f "${_mirror_env_sh}" ]]; then
+    # shellcheck disable=SC1091
+    source "${_mirror_env_sh}"
+    BLUEPRINT_CRAN_MIRROR="${BLUEPRINT_CRAN_MIRROR:-$(eval echo "\${${_mirror_preset}_cran_mirror:-}")}"
+    BLUEPRINT_BIOCONDUCTOR_MIRROR="${BLUEPRINT_BIOCONDUCTOR_MIRROR:-$(eval echo "\${${_mirror_preset}_bioconductor_mirror:-}")}"
+    BLUEPRINT_PYPI_MIRROR="${BLUEPRINT_PYPI_MIRROR:-$(eval echo "\${${_mirror_preset}_pypi_mirror:-}")}"
+  fi
+fi
 
 # ---------------------------------------------------------------------------
 # Env file generation (whitelist-based)
@@ -568,6 +596,11 @@ write_env_line "${APP_ENV_DIR}/backend.env" BLUEPRINT_DATA_ROOT "${DATA_ROOT}"
 write_env_line "${APP_ENV_DIR}/backend.env" BLUEPRINT_DEFAULT_PYTHON_RUNTIME "${BLUEPRINT_DEFAULT_PYTHON_RUNTIME:-${DEFAULT_PYTHON_RUNTIME}}"
 write_env_line "${APP_ENV_DIR}/backend.env" BLUEPRINT_DEFAULT_R_RUNTIME "${BLUEPRINT_DEFAULT_R_RUNTIME:-${DEFAULT_R_RUNTIME}}"
 write_env_line "${APP_ENV_DIR}/backend.env" BLUEPRINT_EXECUTOR_CONDA_BASE "${BLUEPRINT_EXECUTOR_CONDA_BASE:-${CONDA_BASE}}"
+write_env_line "${APP_ENV_DIR}/backend.env" BLUEPRINT_EXECUTOR_MAMBA_ROOT_PREFIX "${BLUEPRINT_EXECUTOR_MAMBA_ROOT_PREFIX:-${MAMBA_ROOT_PREFIX:-}}"
+write_env_line "${APP_ENV_DIR}/backend.env" BLUEPRINT_EXECUTOR_MAMBARC "${BLUEPRINT_EXECUTOR_MAMBARC:-${MAMBARC:-}}"
+write_env_line "${APP_ENV_DIR}/backend.env" BLUEPRINT_CRAN_MIRROR "${BLUEPRINT_CRAN_MIRROR:-}"
+write_env_line "${APP_ENV_DIR}/backend.env" BLUEPRINT_BIOCONDUCTOR_MIRROR "${BLUEPRINT_BIOCONDUCTOR_MIRROR:-}"
+write_env_line "${APP_ENV_DIR}/backend.env" BLUEPRINT_PYPI_MIRROR "${BLUEPRINT_PYPI_MIRROR:-}"
 # Only write provider credentials when explicitly provided.
 # Setting to an empty string explicitly clears the old value on upgrade.
 if [[ -n "${BLUEPRINT_DEEPSEEK_API_KEY:-}" ]]; then

@@ -420,9 +420,26 @@ class CommandTemplateWorkerAdapter(WorkerAdapter):
             ]
         )
         conda_base = Path(getattr(settings, "executor_conda_base", default_conda_base()))
+        mamba_root_prefix = getattr(settings, "executor_mamba_root_prefix", None)
+        mamba_root_prefix_path = Path(mamba_root_prefix) if mamba_root_prefix else None
+        mambarc = getattr(settings, "executor_mambarc", None)
         if not host_root_readonly and conda_base.exists() and str(conda_base) not in {"/bin", "/usr", "/lib", "/lib64", "/etc", "/opt"}:
             bind_args.extend(["--ro-bind", str(conda_base), str(conda_base)])
             readonly_binds.append(conda_base)
+        if mamba_root_prefix_path:
+            if (
+                not host_root_readonly
+                and mamba_root_prefix_path.exists()
+                and str(mamba_root_prefix_path) != str(conda_base)
+                and str(mamba_root_prefix_path) not in {"/bin", "/usr", "/lib", "/lib64", "/etc", "/opt"}
+            ):
+                bind_args.extend(["--ro-bind", str(mamba_root_prefix_path), str(mamba_root_prefix_path)])
+                readonly_binds.append(mamba_root_prefix_path)
+            environment["MAMBA_ROOT_PREFIX"] = str(mamba_root_prefix_path)
+        if mambarc:
+            mambarc_path = Path(mambarc)
+            if mambarc_path.exists():
+                environment["MAMBARC"] = str(mambarc_path)
         env_keys = {
             "BLUEPRINT_PROJECT_ROOT",
             "BLUEPRINT_RUN_DIR",
@@ -477,6 +494,8 @@ class CommandTemplateWorkerAdapter(WorkerAdapter):
             "CLAUDE_CONFIG_DIR",
             "OPENCODE_CONFIG_DIR",
             "CODEX_CONFIG_DIR",
+            "MAMBA_ROOT_PREFIX",
+            "MAMBARC",
             "http_proxy",
             "https_proxy",
             "no_proxy",
@@ -555,6 +574,7 @@ class CommandTemplateWorkerAdapter(WorkerAdapter):
             "pi_agent_dir": str(pi_agent_dir),
             "pi_session_dir": str(pi_session_dir),
             "conda_base": str(conda_base) if conda_base.exists() else None,
+            "mamba_root_prefix": str(mamba_root_prefix_path) if mamba_root_prefix and mamba_root_prefix_path.exists() else None,
             "conda_env": packet.executor_context.runtime_bindings.conda_env if packet.executor_context else None,
             "r_env": packet.executor_context.runtime_bindings.r_env if packet.executor_context else None,
             "rscript": environment.get("BLUEPRINT_RSCRIPT"),

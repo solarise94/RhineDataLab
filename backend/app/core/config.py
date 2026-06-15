@@ -29,6 +29,7 @@ def default_conda_base_candidates(configured_base: Path | None = None) -> list[P
     seen: set[Path] = set()
     for candidate in (
         configured_base,
+        Path.home() / ".local/share/blueprint-re/mamba",  # bundled micromamba root prefix
         Path.home() / "miniforge3",
         Path.home() / "miniconda3",
         Path.home() / "anaconda3",
@@ -46,10 +47,10 @@ def default_conda_base_candidates(configured_base: Path | None = None) -> list[P
 def find_conda_solver(conda_base: Path) -> Path | None:
     """Search ``conda_base`` for a conda solver executable.
 
-    Prefers ``mamba``, then ``conda``, checking both ``bin/`` and ``condabin/``.
-    Returns ``None`` when no solver is found under the given base.
+    Prefers ``micromamba`` (fastest, standalone), then ``mamba``, then ``conda``.
+    Checks both ``bin/`` and ``condabin/``. Returns ``None`` when no solver is found.
     """
-    for name in ("mamba", "conda"):
+    for name in ("micromamba", "mamba", "conda"):
         for subdir in ("bin", "condabin"):
             candidate = conda_base / subdir / name
             if candidate.exists():
@@ -124,8 +125,13 @@ class Settings(BaseSettings):
     executor_sandbox_mode: str = "bwrap"
     executor_max_concurrent_runs: int = 3
     executor_conda_base: Path = Field(default_factory=default_conda_base)
+    executor_mamba_root_prefix: str | None = None
+    executor_mambarc: str | None = None
     default_python_runtime: str | None = None
     default_r_runtime: str | None = None
+    cran_mirror: str = ""
+    bioconductor_mirror: str = ""
+    pypi_mirror: str = ""
     executor_host_root_readonly: bool = True
     executor_extra_ro_binds: str = Field(default_factory=lambda: f"{Path.home()}/.nvm,{Path.home()}/.local")
     opencode_command: str | None = None

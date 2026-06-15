@@ -427,6 +427,7 @@ class ResolverServiceTest(unittest.TestCase):
                     "runtime": "python_env",
                     "packages": ["numpy", "pandas", "scipy"],
                 },
+                policy="report_only",
             )
         self.assertEqual(plan.status, RESOLVER_STATUS_SOLVER_ERROR)
         for entry in plan.packages:
@@ -607,7 +608,7 @@ class ResolverFallbackPolicyTest(unittest.TestCase):
                 {
                     "ecosystem": "R",
                     "runtime": "R_env",
-                    "packages": ["limma"],
+                    "packages": ["ggplot2"],
                 },
                 policy="allow_safe_registry_install",
             )
@@ -662,7 +663,7 @@ class ResolverFallbackPolicyTest(unittest.TestCase):
         self.assertEqual(result.match, "numpy")
 
     def test_solver_error_prevents_fallback(self) -> None:
-        """solver_error must not auto-fallback to CRAN/pip."""
+        """solver_error must not auto-fallback to CRAN/pip under report_only policy."""
         resolver = RuntimeDependencyResolverService()
         with patch.object(
             RuntimeDependencyResolverService,
@@ -688,6 +689,7 @@ class ResolverFallbackPolicyTest(unittest.TestCase):
                     "runtime": "python_env",
                     "packages": ["numpy"],
                 },
+                policy="report_only",
             )
         self.assertEqual(plan.status, RESOLVER_STATUS_SOLVER_ERROR)
         self.assertEqual(plan.error_code, "dependency_probe_failed")

@@ -170,6 +170,11 @@ export_runtime_bin_env() {
   export BLUEPRINT_NGINX_BIN="${ENV_NGINX}"
   export BLUEPRINT_BWRAP_BIN="${ENV_BWRAP}"
   export BLUEPRINT_GIT_BIN="${ENV_GIT}"
+  export BLUEPRINT_EXECUTOR_MAMBA_ROOT_PREFIX="${BLUEPRINT_EXECUTOR_MAMBA_ROOT_PREFIX:-}"
+  export BLUEPRINT_EXECUTOR_MAMBARC="${BLUEPRINT_EXECUTOR_MAMBARC:-}"
+  export BLUEPRINT_CRAN_MIRROR="${BLUEPRINT_CRAN_MIRROR:-}"
+  export BLUEPRINT_BIOCONDUCTOR_MIRROR="${BLUEPRINT_BIOCONDUCTOR_MIRROR:-}"
+  export BLUEPRINT_PYPI_MIRROR="${BLUEPRINT_PYPI_MIRROR:-}"
 }
 
 # Run deploy_release.sh with the current runtime binary env and optional flags.
@@ -422,11 +427,15 @@ info "Phase 4: Runtime bootstrap"
 MAMBA_EXE=""
 CONDA_EXE=""
 
-# 1. Check for embedded micromamba
-if [[ -f "${PAYLOAD_DIR}/runtime/micromamba" ]]; then
+# 1. Check for embedded micromamba (legacy runtime/micromamba or bundled runtime/bin/micromamba).
+if [[ -f "${PAYLOAD_DIR}/runtime/bin/micromamba" ]]; then
+  MAMBA_EXE="${PAYLOAD_DIR}/runtime/bin/micromamba"
+  chmod +x "${MAMBA_EXE}"
+  info "Using bundled micromamba."
+elif [[ -f "${PAYLOAD_DIR}/runtime/micromamba" ]]; then
   MAMBA_EXE="${PAYLOAD_DIR}/runtime/micromamba"
   chmod +x "${MAMBA_EXE}"
-  info "Using embedded micromamba."
+  info "Using embedded micromamba (legacy path)."
 fi
 
 # 2. Check for existing micromamba/mamba/conda
@@ -507,6 +516,100 @@ else
   else
     "${CONDA_EXE}" create -y -p "${ENV_DIR}" -f "${PAYLOAD_DIR}/runtime/environment.yml"
   fi
+fi
+
+# ---------------------------------------------------------------------------
+# Phase 5b: Provision bundled micromamba + R runtime
+# ---------------------------------------------------------------------------
+
+BUNDLED_MAMBA_ROOT="${RELEASE_BASE}/mamba"
+BUNDLED_MAMBA_BIN="${BUNDLED_MAMBA_ROOT}/bin/micromamba"
+BUNDLED_MAMBARC="${BUNDLED_MAMBA_ROOT}/.mambarc"
+BLUEPRINT_DEFAULT_R_RUNTIME="${BLUEPRINT_DEFAULT_R_RUNTIME:-}"
+
+provision_bundled_mamba_in_release() {
+  if [[ ! -x "${MAMBA_EXE}" ]]; then
+    warn "No bundled micromamba available; skipping bundled mamba/R runtime provisioning."
+    return 1
+  fi
+  if [[ ! -f "${PAYLOAD_DIR}/runtime/blueprint-re-r.yml" ]]; then
+    warn "No blueprint-re-r.yml in payload; skipping bundled R runtime provisioning."
+    return 1
+  fi
+
+  info "Provisioning bundled micromamba root at ${BUNDLED_MAMBA_ROOT}"
+  mkdir -p "${BUNDLED_MAMBA_ROOT}/bin" "${BUNDLED_MAMBA_ROOT}/envs"
+  cp "${MAMBA_EXE}" "${BUNDLED_MAMBA_BIN}"
+  chmod +x "${BUNDLED_MAMBA_BIN}"
+
+  local preset="${BLUEPRINT_MIRROR_PRESET:-tsinghua}"
+  if [[ -f "${PAYLOAD_DIR}/runtime/mirror-presets/${preset}.mambarc" ]]; then
+    cp "${PAYLOAD_DIR}/runtime/mirror-presets/${preset}.mambarc" "${BUNDLED_MAMBARC}"
+  elif [[ -f "${PAYLOAD_DIR}/runtime/mirror-presets/default.mambarc" ]]; then
+    cp "${PAYLOAD_DIR}/runtime/mirror-presets/default.mambarc" "${BUNDLED_MAMBARC}"
+  fi
+  printf '\nroot_prefix: %s\n' "${BUNDLED_MAMBA_ROOT}" >> "${BUNDLED_MAMBARC}"
+
+  export MAMBA_ROOT_PREFIX="${BUNDLED_MAMBA_ROOT}"
+  export MAMBARC="${BUNDLED_MAMBARC}"
+
+  # Expand mirror preset env vars for the deploy step.
+  if [[ -f "${PAYLOAD_DIR}/runtime/mirror-presets/mirror_env.sh" ]]; then
+    # shellcheck disable=SC1091
+    source "${PAYLOAD_DIR}/runtime/mirror-presets/mirror_env.sh"
+    BLUEPRINT_CRAN_MIRROR="${BLUEPRINT_CRAN_MIRROR:-$(eval echo "\${${preset}_cran_mirror:-}")}"
+    BLUEPRINT_BIOCONDUCTOR_MIRROR="${BLUEPRINT_BIOCONDUCTOR_MIRROR:-$(eval echo "\${${preset}_bioconductor_mirror:-}")}"
+    BLUEPRINT_PYPI_MIRROR="${BLUEPRINT_PYPI_MIRROR:-$(eval echo "\${${preset}_pypi_mirror:-}")}"
+  fi
+
+  local r_env="blueprint-re-r"
+  local r_env_dir="${BUNDLED_MAMBA_ROOT}/envs/${r_env}"
+  local r_env_spec="${PAYLOAD_DIR}/runtime/blueprint-re-r.yml"
+  local marker_file="${r_env_dir}/.blueprint-re-r.build-info"
+  local spec_hash
+  spec_hash="$(sha256sum "${r_env_spec}" | awk '{print $1}')"
+  local micromamba_version
+  micromamba_version="$("${BUNDLED_MAMBA_BIN}" --version 2>/dev/null || echo unknown)"
+  local expected_marker="${spec_hash} ${micromamba_version}"
+
+  if [[ -x "${r_env_dir}/bin/Rscript" ]]; then
+    if [[ -f "${marker_file}" ]]; then
+      if [[ "$(cat "${marker_file}" 2>/dev/null)" == "${expected_marker}" ]]; then
+        info "Bundled R runtime ${r_env} is up to date."
+        BLUEPRINT_DEFAULT_R_RUNTIME="${r_env}"
+        return 0
+      fi
+      info "Bundled R runtime spec or micromamba version changed; rebuilding ${r_env}."
+    else
+      info "Bundled R runtime exists but build marker is missing; rebuilding ${r_env}."
+    fi
+    "${BUNDLED_MAMBA_BIN}" env remove -n "${r_env}" -y 2>/dev/null || true
+  fi
+
+  info "Creating bundled R runtime (${r_env})... this may take 5-20 min."
+  local create_cmd=("${BUNDLED_MAMBA_BIN}" create -y -n "${r_env}" -f "${r_env_spec}")
+  if [[ -d "${PAYLOAD_DIR}/runtime/pkgs" && -n "$(ls -A "${PAYLOAD_DIR}/runtime/pkgs" 2>/dev/null)" ]]; then
+    info "Using embedded R package cache for offline install."
+    mkdir -p "${BUNDLED_MAMBA_ROOT}/pkgs"
+    cp -a "${PAYLOAD_DIR}/runtime/pkgs/." "${BUNDLED_MAMBA_ROOT}/pkgs/"
+    create_cmd+=(--offline)
+  fi
+  if ! "${create_cmd[@]}"; then
+    warn "Bundled R runtime provisioning failed; cleaning partial env."
+    "${BUNDLED_MAMBA_BIN}" env remove -n "${r_env}" -y 2>/dev/null || true
+    return 1
+  fi
+  printf '%s %s\n' "${spec_hash}" "${micromamba_version}" > "${marker_file}"
+  BLUEPRINT_DEFAULT_R_RUNTIME="${r_env}"
+  info "Bundled R runtime ${r_env} ready."
+}
+
+if provision_bundled_mamba_in_release; then
+  export BLUEPRINT_EXECUTOR_MAMBA_ROOT_PREFIX="${BUNDLED_MAMBA_ROOT}"
+  export BLUEPRINT_EXECUTOR_MAMBARC="${BUNDLED_MAMBARC}"
+  export BLUEPRINT_CRAN_MIRROR="${BLUEPRINT_CRAN_MIRROR:-}"
+  export BLUEPRINT_BIOCONDUCTOR_MIRROR="${BLUEPRINT_BIOCONDUCTOR_MIRROR:-}"
+  export BLUEPRINT_PYPI_MIRROR="${BLUEPRINT_PYPI_MIRROR:-}"
 fi
 
 # ---------------------------------------------------------------------------

@@ -1057,8 +1057,39 @@ class ProjectService:
                 result.append(checker(self.settings))
         return result
 
+    @staticmethod
+    def _runtime_source(path: Path | str | None) -> str:
+        """Classify a runtime path by its provisioning source."""
+        if path is None:
+            return "system"
+        path_obj = Path(path)
+        if path_obj.name == "__system__":
+            return "system"
+        bundled_root = Path.home() / ".local/share/blueprint-re/mamba"
+        try:
+            path_obj.relative_to(bundled_root)
+            return "bundled"
+        except ValueError:
+            pass
+        for base in default_conda_base_candidates():
+            try:
+                path_obj.relative_to(base)
+                return "conda"
+            except ValueError:
+                continue
+        return "system"
+
     def _python_runtimes(self) -> list[dict]:
-        runtimes: list[dict] = [{"name": "__system__", "label": "System Python", "path": None, "manager": "system", "exists": True}]
+        runtimes: list[dict] = [
+            {
+                "name": "__system__",
+                "label": "System Python",
+                "path": None,
+                "manager": "system",
+                "source": "system",
+                "exists": True,
+            }
+        ]
         seen = {"__system__"}
         manager_labels = {
             "miniforge3": "miniforge",
@@ -1078,6 +1109,7 @@ class ProjectService:
                         "label": f"{manager}: base",
                         "path": str(base),
                         "manager": manager,
+                        "source": self._runtime_source(base),
                         "exists": True,
                     }
                 )
@@ -1095,6 +1127,7 @@ class ProjectService:
                         "label": f"{env_dir.name} ({manager})",
                         "path": str(env_dir),
                         "manager": manager,
+                        "source": self._runtime_source(env_dir),
                         "exists": True,
                     }
                 )
@@ -1109,6 +1142,7 @@ class ProjectService:
                 "label": "System R",
                 "path": system_rscript,
                 "manager": "system",
+                "source": "system",
                 "exists": bool(system_rscript),
             }
         ]
@@ -1131,6 +1165,7 @@ class ProjectService:
                         "label": f"{manager}: base R",
                         "path": str(base_rscript),
                         "manager": manager,
+                        "source": self._runtime_source(base),
                         "exists": True,
                     }
                 )
@@ -1148,6 +1183,7 @@ class ProjectService:
                         "label": f"{env_dir.name} R ({manager})",
                         "path": str(rscript_bin),
                         "manager": manager,
+                        "source": self._runtime_source(env_dir),
                         "exists": True,
                     }
                 )

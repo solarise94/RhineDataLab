@@ -1963,15 +1963,22 @@ class ManagerBlueprintTools:
             safe_names.append(stripped)
         import json as _json
         package_vector = "c(" + ", ".join(_json.dumps(item) for item in safe_names) + ")"
+        settings = self.project_service.settings
+        cran = getattr(settings, "cran_mirror", "") or "https://cloud.r-project.org"
+        bioc = getattr(settings, "bioconductor_mirror", "") or ""
         if installer_type == "cran":
             expression = (
-                'options(repos=c(CRAN="https://cloud.r-project.org")); '
+                f'options(repos=c(CRAN={_json.dumps(cran)})); '
                 f"install.packages({package_vector}, dependencies=TRUE)"
             )
         else:
+            # Load BiocManager before setting BioC_mirror; repositories() is not
+            # available until BiocManager is attached.
+            bioc_opt = f'options(BioC_mirror={_json.dumps(bioc)}); ' if bioc else ''
             expression = (
-                'options(repos=c(CRAN="https://cloud.r-project.org")); '
+                f'options(repos=c(CRAN={_json.dumps(cran)})); '
                 'if (!requireNamespace("BiocManager", quietly=TRUE)) install.packages("BiocManager"); '
+                f'{bioc_opt}'
                 f"BiocManager::install({package_vector}, ask=FALSE, update=FALSE)"
             )
         command = [str(rscript), "--vanilla", "-e", expression]

@@ -121,6 +121,17 @@ RESOLVER_TO_P0_FIELDS: dict[str, dict[str, str | None]] = {
 FALLBACK_FAMILIES_PYTHON: list[str] = ["pip"]
 FALLBACK_FAMILIES_R: list[str] = ["cran", "bioconductor"]
 
+# Known Bioconductor-only packages. When a request contains any of these,
+# force the bioconductor fallback family: BiocManager::install can also
+# install CRAN packages, so mixed requests are safe, but install.packages()
+# will fail for Bioconductor-only packages like DESeq2.
+BIOCONDUCTOR_ONLY_PACKAGES: frozenset[str] = frozenset({
+    "deseq2", "edger", "limma", "clusterprofiler", "complexheatmap",
+    "sva", "genefilter", "genomicfeatures", "rtracklayer",
+    "annotationdbi", "biomart", "goseq", "pathview", "reactomepa",
+    "gsva", "scran", "scater", "soupx",
+})
+
 # Grammar used to validate bare names when a fallback install action is emitted.
 # We keep it strict to refuse source-style inputs.
 BARE_NAME_GRAMMAR = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*$")
@@ -831,6 +842,26 @@ class RuntimeDependencyResolverService:
             )
 
         if probe_result.status == "solver_error":
+            # A probe failure (timeout/solver error) does not mean the package
+            # does not exist. When the ecosystem has registry fallback families
+            # and the active policy allows safe registry installs, downgrade to
+            # fallback_required so the caller can retry via pip / cran /
+            # bioconductor instead of blocking on a transient conda issue.
+            if fallback and getattr(self, "_active_policy", "report_only") == "allow_safe_registry_install":
+                return ResolverPackageEntry(
+                    name=pkg,
+                    normalized_name=normalized,
+                    classification=classification,
+                    conda_candidates=candidates,
+                    fallback_available=fallback,
+                    status=PACKAGE_STATUS_FALLBACK_REQUIRED,
+                    reason=f"conda_probe_failed:{probe_result.error_code or 'unknown'}",
+                    message=(
+                        f"Conda probe failed for {pkg!r} "
+                        f"({probe_result.error_detail or 'unknown'}); "
+                        "registry fallback available under the active policy."
+                    ),
+                ), None
             return ResolverPackageEntry(
                 name=pkg,
                 normalized_name=normalized,
@@ -902,9 +933,16 @@ class RuntimeDependencyResolverService:
             return
 
         # Build safe fallback actions only when the resolver can reduce the
-        # request to one registry family. For R dual-source hints, prefer CRAN
-        # when every package can legally install from CRAN.
-        family = _single_safe_fallback_family(non_conda_packages)
+        # request to one registry family. For R requests, prefer bioconductor
+        # when any package is known to be Bioconductor-only; otherwise fall
+        # back to the original single-family / CRAN convergence logic.
+        is_r_ecosystem = bool(
+            non_conda_packages and non_conda_packages[0].classification == "r-package"
+        )
+        if is_r_ecosystem:
+            family = _select_r_fallback_family(non_conda_packages)
+        else:
+            family = _single_safe_fallback_family(non_conda_packages)
         if family is None:
             return
         for pkg in non_conda_packages:
@@ -1428,6 +1466,25 @@ def _single_safe_fallback_family(packages: Iterable[ResolverPackageEntry]) -> st
     return None
 
 
+def _select_r_fallback_family(packages: Iterable[ResolverPackageEntry]) -> str | None:
+    """Choose a single safe fallback family for R packages.
+
+    Priority:
+    1. Any package is known to be Bioconductor-only -> bioconductor
+       (BiocManager::install can also satisfy CRAN dependencies).
+    2. Every package resolves to exactly one family -> that family.
+    3. Every blocked package includes cran (R dual-source hints) -> cran.
+    4. Otherwise ambiguous -> None.
+    """
+    entries = list(packages)
+    if not entries:
+        return None
+    lowered = {e.name.lower() for e in entries}
+    if lowered & BIOCONDUCTOR_ONLY_PACKAGES:
+        return "bioconductor"
+    return _single_safe_fallback_family(entries)
+
+
 def _conda_candidates_for(pkg: str, ecosystem: str) -> list[str]:
     """Return the conda-family candidate names to probe for ``pkg``."""
     if ecosystem.lower() == "r":
@@ -1596,7 +1653,13 @@ def collect_fallback_actions(
         entry for entry in plan.packages
         if entry.status == PACKAGE_STATUS_FALLBACK_REQUIRED
     ]
-    family = _single_safe_fallback_family(fallback_packages)
+    is_r_ecosystem = bool(
+        fallback_packages and fallback_packages[0].classification == "r-package"
+    )
+    if is_r_ecosystem:
+        family = _select_r_fallback_family(fallback_packages)
+    else:
+        family = _single_safe_fallback_family(fallback_packages)
     if family is None:
         return []
     actions: list[ResolverInstallAction] = []

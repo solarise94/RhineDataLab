@@ -6,6 +6,53 @@ ENV_FILE="${ROOT_DIR}/.env"
 INSTALL_INTERACTIVE=0
 REQUIRED_PYTHON_VERSION="3.13.0"
 REQUIRED_NODE_VERSION="22.19.0"
+BLUEPRINT_MIRROR_PRESET="${BLUEPRINT_MIRROR_PRESET:-tsinghua}"
+
+# Remember which mirror variables were explicitly provided by the user so we
+# do not overwrite them when the preset changes later (e.g. via .env or
+# --interactive). Script-derived values are recomputed on preset changes.
+_USER_CRAN_MIRROR_SET=0
+_USER_BIOCONDUCTOR_MIRROR_SET=0
+_USER_PYPI_MIRROR_SET=0
+[[ -n "${BLUEPRINT_CRAN_MIRROR:-}" ]] && _USER_CRAN_MIRROR_SET=1
+[[ -n "${BLUEPRINT_BIOCONDUCTOR_MIRROR:-}" ]] && _USER_BIOCONDUCTOR_MIRROR_SET=1
+[[ -n "${BLUEPRINT_PYPI_MIRROR:-}" ]] && _USER_PYPI_MIRROR_SET=1
+_INITIAL_MIRROR_PRESET="${BLUEPRINT_MIRROR_PRESET}"
+
+# Expand mirror preset into registry-specific *_mirror variables.
+# Try the source-tree layout first, then the release bundle layout.
+MIRROR_PRESETS_DIR=""
+if [[ -f "${ROOT_DIR}/deploy/runtime/mirror-presets/mirror_env.sh" ]]; then
+  MIRROR_PRESETS_DIR="${ROOT_DIR}/deploy/runtime/mirror-presets"
+elif [[ -f "${ROOT_DIR}/runtime/mirror-presets/mirror_env.sh" ]]; then
+  MIRROR_PRESETS_DIR="${ROOT_DIR}/runtime/mirror-presets"
+fi
+
+_expand_mirror_preset() {
+  local preset="$1"
+  [[ -n "${MIRROR_PRESETS_DIR}" ]] || return 0
+  # If the preset changed since the last expansion, clear script-derived
+  # mirrors so they are recomputed. User-explicit values are preserved.
+  if [[ "${preset}" != "${_LAST_EXPANDED_MIRROR_PRESET:-}" ]]; then
+    [[ "${_USER_CRAN_MIRROR_SET}" -eq 0 ]] && BLUEPRINT_CRAN_MIRROR=""
+    [[ "${_USER_BIOCONDUCTOR_MIRROR_SET}" -eq 0 ]] && BLUEPRINT_BIOCONDUCTOR_MIRROR=""
+    [[ "${_USER_PYPI_MIRROR_SET}" -eq 0 ]] && BLUEPRINT_PYPI_MIRROR=""
+  fi
+  _LAST_EXPANDED_MIRROR_PRESET="${preset}"
+  # shellcheck disable=SC1091
+  source "${MIRROR_PRESETS_DIR}/mirror_env.sh"
+  if [[ "${_USER_CRAN_MIRROR_SET}" -eq 0 ]]; then
+    BLUEPRINT_CRAN_MIRROR="${BLUEPRINT_CRAN_MIRROR:-$(eval echo "\${${preset}_cran_mirror:-}")}"
+  fi
+  if [[ "${_USER_BIOCONDUCTOR_MIRROR_SET}" -eq 0 ]]; then
+    BLUEPRINT_BIOCONDUCTOR_MIRROR="${BLUEPRINT_BIOCONDUCTOR_MIRROR:-$(eval echo "\${${preset}_bioconductor_mirror:-}")}"
+  fi
+  if [[ "${_USER_PYPI_MIRROR_SET}" -eq 0 ]]; then
+    BLUEPRINT_PYPI_MIRROR="${BLUEPRINT_PYPI_MIRROR:-$(eval echo "\${${preset}_pypi_mirror:-}")}"
+  fi
+}
+
+_expand_mirror_preset "${BLUEPRINT_MIRROR_PRESET}"
 
 for arg in "$@"; do
   case "${arg}" in
@@ -69,6 +116,7 @@ detect_conda_base() {
   local candidates=(
     "${BLUEPRINT_EXECUTOR_CONDA_BASE:-}"
     "${CONDA_PREFIX:-}"
+    "${HOME}/.local/share/blueprint-re/mamba"
     "${HOME}/miniconda3"
     "${HOME}/miniforge3"
     "${HOME}/anaconda3"
@@ -77,12 +125,85 @@ detect_conda_base() {
   local candidate
   for candidate in "${candidates[@]}"; do
     [[ -n "${candidate}" ]] || continue
-    if [[ -x "${candidate}/bin/conda" ]]; then
+    if [[ -x "${candidate}/bin/conda" || -x "${candidate}/bin/micromamba" ]]; then
       printf '%s\n' "${candidate}"
       return 0
     fi
   done
   return 1
+}
+
+# Provision the bundled micromamba binary shipped in runtime/bin/micromamba.
+# The target directory doubles as MAMBA_ROOT_PREFIX so envs land in a stable,
+# resolver-discoverable location.
+provision_bundled_mamba() {
+  local bundled="${ROOT_DIR}/runtime/bin/micromamba"
+  local target="${HOME}/.local/share/blueprint-re/mamba"
+  [[ -x "${bundled}" ]] || return 1
+  mkdir -p "${target}/bin" "${target}/envs"
+  cp "${bundled}" "${target}/bin/micromamba"
+
+  local preset="${BLUEPRINT_MIRROR_PRESET:-tsinghua}"
+  if [[ -f "${ROOT_DIR}/runtime/mirror-presets/${preset}.mambarc" ]]; then
+    cp "${ROOT_DIR}/runtime/mirror-presets/${preset}.mambarc" "${target}/.mambarc"
+  elif [[ -f "${ROOT_DIR}/deploy/runtime/mirror-presets/${preset}.mambarc" ]]; then
+    cp "${ROOT_DIR}/deploy/runtime/mirror-presets/${preset}.mambarc" "${target}/.mambarc"
+  fi
+  echo "root_prefix: ${target}" >> "${target}/.mambarc"
+
+  export MAMBA_ROOT_PREFIX="${target}"
+  export MAMBARC="${target}/.mambarc"
+  printf '%s\n' "${target}"
+}
+
+provision_bundled_r_runtime() {
+  local mamba_base="$1"
+  local r_env="blueprint-re-r"
+  local env_spec="${ROOT_DIR}/runtime/blueprint-re-r.yml"
+  local local_pkgs="${ROOT_DIR}/runtime/pkgs"
+  local micromamba_bin="${mamba_base}/bin/micromamba"
+  [[ -x "${micromamba_bin}" && -f "${env_spec}" ]] || return 1
+
+  local env_dir="${mamba_base}/envs/${r_env}"
+  local marker_file="${env_dir}/.blueprint-re-r.build-info"
+  local spec_hash
+  spec_hash="$(sha256sum "${env_spec}" | awk '{print $1}')"
+  local micromamba_version
+  micromamba_version="$("${micromamba_bin}" --version 2>/dev/null || echo unknown)"
+  local expected_marker="${spec_hash} ${micromamba_version}"
+
+  if [[ -x "${env_dir}/bin/Rscript" ]]; then
+    if [[ -f "${marker_file}" ]]; then
+      if [[ "$(cat "${marker_file}" 2>/dev/null)" == "${expected_marker}" ]]; then
+        printf '%s\n' "${r_env}"
+        return 0
+      fi
+      echo "Bundled R runtime spec or micromamba version changed; rebuilding ${r_env}." >&2
+    else
+      echo "Bundled R runtime exists but build marker is missing; rebuilding ${r_env}." >&2
+    fi
+    "${micromamba_bin}" env remove -n "${r_env}" -y 2>/dev/null || true
+  fi
+
+  echo "Provisioning bundled R runtime (${r_env})... this may take 5-20 min." >&2
+  export MAMBA_ROOT_PREFIX="${mamba_base}"
+  export MAMBARC="${mamba_base}/.mambarc"
+
+  local create_cmd=("${micromamba_bin}" create -y -n "${r_env}" -f "${env_spec}")
+  if [[ -d "${local_pkgs}" ]] && [[ -n "$(ls -A "${local_pkgs}" 2>/dev/null)" ]]; then
+    echo "Using embedded R package cache for offline install." >&2
+    mkdir -p "${mamba_base}/pkgs"
+    cp -a "${local_pkgs}/." "${mamba_base}/pkgs/"
+    create_cmd+=(--offline)
+  fi
+
+  if ! "${create_cmd[@]}"; then
+    echo "R runtime provisioning failed; cleaning partial env." >&2
+    "${micromamba_bin}" env remove -n "${r_env}" -y 2>/dev/null || true
+    return 1
+  fi
+  printf '%s %s\n' "${spec_hash}" "${micromamba_version}" > "${marker_file}"
+  printf '%s\n' "${r_env}"
 }
 
 detect_default_python_runtime() {
@@ -182,10 +303,16 @@ BLUEPRINT_REVIEWER_MAX_TURNS=${BLUEPRINT_REVIEWER_MAX_TURNS}
 BLUEPRINT_EXECUTOR_SANDBOX_MODE=${BLUEPRINT_EXECUTOR_SANDBOX_MODE}
 BLUEPRINT_EXECUTOR_MAX_CONCURRENT_RUNS=${BLUEPRINT_EXECUTOR_MAX_CONCURRENT_RUNS}
 BLUEPRINT_EXECUTOR_CONDA_BASE=${BLUEPRINT_EXECUTOR_CONDA_BASE}
+BLUEPRINT_EXECUTOR_MAMBA_ROOT_PREFIX=${MAMBA_ROOT_PREFIX:-${BLUEPRINT_EXECUTOR_MAMBA_ROOT_PREFIX:-${BLUEPRINT_EXECUTOR_CONDA_BASE:-}}}
+BLUEPRINT_EXECUTOR_MAMBARC=${MAMBARC:-${BLUEPRINT_EXECUTOR_MAMBARC:-}}
 BLUEPRINT_DEFAULT_PYTHON_RUNTIME=${BLUEPRINT_DEFAULT_PYTHON_RUNTIME}
 BLUEPRINT_DEFAULT_R_RUNTIME=${BLUEPRINT_DEFAULT_R_RUNTIME}
 BLUEPRINT_EXECUTOR_HOST_ROOT_READONLY=${BLUEPRINT_EXECUTOR_HOST_ROOT_READONLY}
 BLUEPRINT_EXECUTOR_EXTRA_RO_BINDS=${BLUEPRINT_EXECUTOR_EXTRA_RO_BINDS}
+BLUEPRINT_MIRROR_PRESET=${BLUEPRINT_MIRROR_PRESET}
+BLUEPRINT_CRAN_MIRROR=${BLUEPRINT_CRAN_MIRROR:-}
+BLUEPRINT_BIOCONDUCTOR_MIRROR=${BLUEPRINT_BIOCONDUCTOR_MIRROR:-}
+BLUEPRINT_PYPI_MIRROR=${BLUEPRINT_PYPI_MIRROR:-}
 MANAGER_WEBSEARCH_ENABLED=${MANAGER_WEBSEARCH_ENABLED}
 TAVILY_API_KEY=${TAVILY_API_KEY}
 TAVILY_BASE_URL=${TAVILY_BASE_URL}
@@ -195,6 +322,9 @@ MANAGER_COMPACTION_KEEP_RECENT_TOKENS=${MANAGER_COMPACTION_KEEP_RECENT_TOKENS}
 MANAGER_COMPACTION_RESERVE_TOKENS=${MANAGER_COMPACTION_RESERVE_TOKENS}
 EOF
 }
+
+# Main execution guard: allow sourcing this script for behavior-based tests.
+if [[ "${BASH_SOURCE[0]}" == "${0}" ]]; then
 
 if [[ -f "${ENV_FILE}" ]]; then
   set -a
@@ -207,13 +337,21 @@ PYTHON_BIN="$(find_python_bin 2>/dev/null || true)"
 NODE_BIN="$(find_node_bin 2>/dev/null || true)"
 
 if [[ -z "${BLUEPRINT_EXECUTOR_CONDA_BASE:-}" ]]; then
-  BLUEPRINT_EXECUTOR_CONDA_BASE="$(detect_conda_base 2>/dev/null || true)"
+  BLUEPRINT_EXECUTOR_CONDA_BASE="$(
+    detect_conda_base 2>/dev/null \
+    || provision_bundled_mamba 2>/dev/null \
+    || true
+  )"
 fi
 if [[ -z "${BLUEPRINT_DEFAULT_PYTHON_RUNTIME:-}" ]]; then
   BLUEPRINT_DEFAULT_PYTHON_RUNTIME="$(detect_default_python_runtime "${BLUEPRINT_EXECUTOR_CONDA_BASE:-}" 2>/dev/null || true)"
 fi
 if [[ -z "${BLUEPRINT_DEFAULT_R_RUNTIME:-}" ]]; then
-  BLUEPRINT_DEFAULT_R_RUNTIME="$(detect_default_r_runtime "${BLUEPRINT_EXECUTOR_CONDA_BASE:-}" 2>/dev/null || true)"
+  BLUEPRINT_DEFAULT_R_RUNTIME="$(
+    detect_default_r_runtime "${BLUEPRINT_EXECUTOR_CONDA_BASE:-}" 2>/dev/null \
+    || provision_bundled_r_runtime "${BLUEPRINT_EXECUTOR_CONDA_BASE:-}" 2>/dev/null \
+    || true
+  )"
 fi
 
 printf "Blueprint RE installer\n"
@@ -255,6 +393,7 @@ BLUEPRINT_DEFAULT_WORKER_TYPE="pi"
 prompt_default BLUEPRINT_EXECUTOR_SANDBOX_MODE "Executor sandbox mode" "${BLUEPRINT_EXECUTOR_SANDBOX_MODE:-bwrap}"
 prompt_default BLUEPRINT_EXECUTOR_MAX_CONCURRENT_RUNS "Max concurrent executor runs" "${BLUEPRINT_EXECUTOR_MAX_CONCURRENT_RUNS:-3}"
 prompt_default BLUEPRINT_EXECUTOR_CONDA_BASE "Conda base path" "${BLUEPRINT_EXECUTOR_CONDA_BASE:-/home/${USER}/miniconda3}"
+prompt_default BLUEPRINT_MIRROR_PRESET "Mirror preset (tsinghua/ustc/default)" "${BLUEPRINT_MIRROR_PRESET:-tsinghua}"
 prompt_default BLUEPRINT_DEFAULT_PYTHON_RUNTIME "Default Python runtime" "${BLUEPRINT_DEFAULT_PYTHON_RUNTIME:-}"
 prompt_default BLUEPRINT_DEFAULT_R_RUNTIME "Default R runtime" "${BLUEPRINT_DEFAULT_R_RUNTIME:-}"
 prompt_default BLUEPRINT_EXECUTOR_HOST_ROOT_READONLY "Host root read-only" "${BLUEPRINT_EXECUTOR_HOST_ROOT_READONLY:-true}"
@@ -270,6 +409,9 @@ prompt_default MANAGER_CONTEXT_WINDOW_TOKENS "Manager context window tokens" "${
 prompt_default MANAGER_COMPACTION_ENABLED "Enable automatic compaction (true/false)" "${MANAGER_COMPACTION_ENABLED:-true}"
 prompt_default MANAGER_COMPACTION_KEEP_RECENT_TOKENS "Compaction keep-recent tokens" "${MANAGER_COMPACTION_KEEP_RECENT_TOKENS:-120000}"
 prompt_default MANAGER_COMPACTION_RESERVE_TOKENS "Compaction reserve tokens" "${MANAGER_COMPACTION_RESERVE_TOKENS:-16000}"
+
+# Re-expand mirror preset in case interactive mode changed it.
+_expand_mirror_preset "${BLUEPRINT_MIRROR_PRESET}"
 
 TOKEN_PYTHON_BIN="${PYTHON_BIN:-$(command -v python3 2>/dev/null || true)}"
 if [[ -z "${TOKEN_PYTHON_BIN}" ]]; then
@@ -315,3 +457,4 @@ echo "  backend.env      -> ~/.config/blueprint-re/backend.env"
 echo "  manager-agent.env -> ~/.config/blueprint-re/manager-agent.env"
 echo "  frontend.env     -> ~/.config/blueprint-re/frontend.env"
 echo "Note: editing ${ENV_FILE} requires rerunning deploy to update running services."
+fi  # end main execution guard

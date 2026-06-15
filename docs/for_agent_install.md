@@ -68,6 +68,7 @@ release installer 的职责：
 - 不需要 `sudo` 或 `apt`
 - 安装到 `~/.local/share/blueprint-re/`、`~/.config/blueprint-re/` 和 `~/.config/systemd/user/`
 - 在 `~/.local/share/blueprint-re/env` 中准备 Python、Node.js、nginx、bubblewrap、git
+- 在 `~/.local/share/blueprint-re/mamba` 中准备 standalone `micromamba`，并可选创建 `blueprint-re-r` conda 环境
 - 安装 backend wheel 和 vendored Python dependency wheels
 - 使用预构建 Next.js standalone frontend
 - 使用已打包的 manager-agent production `node_modules`
@@ -211,6 +212,35 @@ WSL 特别注意：
 - 不要把仓库路径中的空格当成用户错误；长期方案是 JSON argv。
 - 不要让 `conda run /mnt/c/Users/.../New project/...` 通过 shell 字符串拼接。
 - 不要因为 bwrap 只读挂载原生目录而改成无沙箱执行。
+
+## Bundled Mamba + R Runtime
+
+Release bundles (built with `scripts/build_release_bundle.sh`) now ship a standalone
+`micromamba` binary in `runtime/bin/micromamba` and a set of mirror presets in
+`runtime/mirror-presets/`. On a fresh machine without an existing conda/mamba/R setup,
+the installer can provision a fully local runtime:
+
+- `BLUEPRINT_MIRROR_PRESET` controls the mirror set. Defaults to `tsinghua` for mainland
+  China; use `ustc` or `default` (official sources) as needed.
+- `provision_bundled_mamba()` copies the bundled `micromamba` to
+  `~/.local/share/blueprint-re/mamba`, writes a `.mambarc` with the selected preset,
+  and exports `MAMBA_ROOT_PREFIX` / `MAMBARC`.
+- `provision_bundled_r_runtime()` creates the `blueprint-re-r` conda environment from
+  `deploy/runtime/blueprint-re-r.yml`. With `--with-r-cache`, packages are pre-downloaded
+  into `runtime/pkgs/` for fully offline installs.
+
+Backend settings:
+
+- `BLUEPRINT_EXECUTOR_MAMBA_ROOT_PREFIX` / `BLUEPRINT_EXECUTOR_MAMBARC` are written to
+  `backend.env` and passed through bwrap as the process-level `MAMBA_ROOT_PREFIX` /
+  `MAMBARC` variables so micromamba can locate envs inside the sandbox.
+- `BLUEPRINT_CRAN_MIRROR`, `BLUEPRINT_BIOCONDUCTOR_MIRROR`, `BLUEPRINT_PYPI_MIRROR` are
+  populated from the selected preset. Empty values mean "use the official source" so
+  overseas deployments are not slowed down by hard-coded defaults.
+
+Diagnostics include a `"source"` field on each runtime entry
+(`"bundled" | "conda" | "system"`) so support bundles immediately show whether the
+user is running the bundled runtime.
 
 ## Runtime Detection Rules
 

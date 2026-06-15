@@ -357,7 +357,7 @@ class ResolverFirstInstallerTest(unittest.TestCase):
                 {
                     "ecosystem": "R",
                     "runtime": "rnaseq",
-                    "packages": ["limma"],
+                    "packages": ["ggplot2"],
                 },
             )
             response = manager.blueprint_tools.install_runtime_dependencies(
@@ -365,7 +365,7 @@ class ResolverFirstInstallerTest(unittest.TestCase):
                 {
                     "ecosystem": "R",
                     "runtime": "rnaseq",
-                    "packages": ["limma"],
+                    "packages": ["ggplot2"],
                 },
             )
 

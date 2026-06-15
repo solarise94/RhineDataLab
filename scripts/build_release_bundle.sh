@@ -15,6 +15,8 @@ set -euo pipefail
 # Options:
 #   --offline-cache    Also populate runtime/packages/ from conda-forge.
 #                      Requires a working micromamba/mamba/conda.
+#   --with-r-cache     Also download the bundled R runtime packages into
+#                      runtime/pkgs/ for offline installs. Requires network.
 #
 # The output defaults to ./dist/.
 
@@ -22,6 +24,7 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
 OUTPUT_DIR="${REPO_ROOT}/dist"
 BUILD_OFFLINE_CACHE=0
+BUILD_R_CACHE=0
 PAYLOAD_NAME="blueprint-re"
 PUBLIC_ARTIFACT_PREFIX="rhinedatalab"
 
@@ -76,6 +79,10 @@ while [[ $# -gt 0 ]]; do
   case "$1" in
     --offline-cache)
       BUILD_OFFLINE_CACHE=1
+      shift
+      ;;
+    --with-r-cache)
+      BUILD_R_CACHE=1
       shift
       ;;
     --help|-h)
@@ -288,6 +295,26 @@ cp "${REPO_ROOT}/scripts/blueprint_pi_launch.sh" "${BUNDLE_ROOT}/scripts/"
 echo "Gathering runtime metadata..."
 cp "${REPO_ROOT}/deploy/runtime-dependencies.yml" "${BUNDLE_ROOT}/runtime/"
 
+# micromamba standalone binary (mamba-org/micromamba-releases, not mamba-org/mamba).
+# Tag includes build suffix (e.g. 2.8.0-0); asset name does not.
+MICROMAMBA_VERSION="2.8.0-0"
+MICROMAMBA_URL="https://github.com/mamba-org/micromamba-releases/releases/download/${MICROMAMBA_VERSION}/micromamba-linux-64"
+mkdir -p "${BUNDLE_ROOT}/runtime/bin"
+echo "Downloading micromamba ${MICROMAMBA_VERSION}..."
+curl -fsSL "${MICROMAMBA_URL}" -o "${BUNDLE_ROOT}/runtime/bin/micromamba"
+chmod +x "${BUNDLE_ROOT}/runtime/bin/micromamba"
+"${BUNDLE_ROOT}/runtime/bin/micromamba" --version || die "micromamba binary broken"
+
+# Mirror presets for bundled mamba + registry installs.
+if [[ -d "${REPO_ROOT}/deploy/runtime/mirror-presets" ]]; then
+  cp -a "${REPO_ROOT}/deploy/runtime/mirror-presets" "${BUNDLE_ROOT}/runtime/mirror-presets"
+fi
+
+# Bundled R runtime environment spec.
+if [[ -f "${REPO_ROOT}/deploy/runtime/blueprint-re-r.yml" ]]; then
+  cp "${REPO_ROOT}/deploy/runtime/blueprint-re-r.yml" "${BUNDLE_ROOT}/runtime/blueprint-re-r.yml"
+fi
+
 # Write a proper conda environment file for online installs.
 cat > "${BUNDLE_ROOT}/runtime/environment.yml" <<'EOF'
 name: blueprint-re-env
@@ -324,6 +351,30 @@ if [[ "${BUILD_OFFLINE_CACHE}" -eq 1 ]]; then
   fi
 fi
 
+# Optionally pre-download the bundled R runtime packages for offline installs.
+if [[ "${BUILD_R_CACHE}" -eq 1 ]]; then
+  if [[ -f "${REPO_ROOT}/deploy/runtime/blueprint-re-r.yml" ]]; then
+    echo "Populating bundled R runtime package cache (this may take a while)..."
+    # Use the bundle runtime dir as MAMBA_ROOT_PREFIX so the package cache lands
+    # in runtime/pkgs/ where the installer expects it.
+    export MAMBA_ROOT_PREFIX="${BUNDLE_ROOT}/runtime"
+    mkdir -p "${BUNDLE_ROOT}/runtime/pkgs"
+    if ! "${BUNDLE_ROOT}/runtime/bin/micromamba" create -y \
+      -p "${BUNDLE_ROOT}/runtime/.tmp-r-env" \
+      -f "${REPO_ROOT}/deploy/runtime/blueprint-re-r.yml" \
+      --download-only; then
+      rm -rf "${BUNDLE_ROOT}/runtime/.tmp-r-env"
+      die "Bundled R runtime package cache download failed."
+    fi
+    rm -rf "${BUNDLE_ROOT}/runtime/.tmp-r-env"
+    if [[ -z "$(ls -A "${BUNDLE_ROOT}/runtime/pkgs" 2>/dev/null)" ]]; then
+      die "Bundled R runtime package cache is empty after download."
+    fi
+  else
+    die "R runtime spec not found; cannot build --with-r-cache."
+  fi
+fi
+
 # ---------------------------------------------------------------------------
 # Generate release.json manifest with checksums
 # ---------------------------------------------------------------------------
@@ -332,10 +383,11 @@ echo "Generating release.json..."
 
 WHEEL_BASENAME="$(basename "${WHEEL_FILE}")"
 WHEEL_CHECKSUM="$(sha256_file "${WHEEL_FILE}")"
+MICROMAMBA_CHECKSUM="$(sha256_file "${BUNDLE_ROOT}/runtime/bin/micromamba")"
 
 # Build checksum map and shell-verifiable manifest with Python to avoid
 # quoting/escaping issues from hand-rolled JSON.
-python3 - "${BUNDLE_ROOT}" "${VERSION}" "wheels/${WHEEL_BASENAME}" "${WHEEL_CHECKSUM}" <<'PY'
+python3 - "${BUNDLE_ROOT}" "${VERSION}" "wheels/${WHEEL_BASENAME}" "${WHEEL_CHECKSUM}" "${MICROMAMBA_VERSION}" "${MICROMAMBA_CHECKSUM}" <<'PY'
 import json
 import hashlib
 import sys
@@ -345,6 +397,8 @@ bundle_root = Path(sys.argv[1])
 version = sys.argv[2]
 wheel_path = sys.argv[3]
 wheel_checksum = sys.argv[4]
+micromamba_version = sys.argv[5]
+micromamba_checksum = sys.argv[6]
 
 # First pass: compute checksums for all existing payload files.
 checksums = {}
@@ -372,6 +426,11 @@ data = {
         "backend_wheel": {
             "path": wheel_path,
             "checksum_sha256": wheel_checksum,
+        },
+        "runtime_micromamba": {
+            "path": "runtime/bin/micromamba",
+            "version": micromamba_version,
+            "checksum_sha256": micromamba_checksum,
         },
         "frontend_standalone": {
             "path": "frontend-standalone",
