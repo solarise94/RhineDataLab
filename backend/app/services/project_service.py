@@ -1154,6 +1154,14 @@ class ProjectService:
                 seen.add(env_dir.name)
         return runtimes
 
+    def get_python_runtimes(self) -> list[dict]:
+        """Public accessor for diagnostic/export consumers."""
+        return self._python_runtimes()
+
+    def get_r_runtimes(self) -> list[dict]:
+        """Public accessor for diagnostic/export consumers."""
+        return self._r_runtimes()
+
     @staticmethod
     def _validate_project_id(project_id: str) -> None:
         if not PROJECT_ID_RE.fullmatch(project_id):

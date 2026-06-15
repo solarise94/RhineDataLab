@@ -123,6 +123,19 @@ class BlueprintRuntimeRequirements(BaseModel):
     r: BlueprintRuntimeRequirement | Literal["__system__"] = "__system__"
 
 
+class ReferenceAssetRef(BaseModel):
+    """A bundled reference-data dependency (e.g. a GTF annotation) the card
+    needs at run time. ``ref_id`` points into the shared reference-data
+    registry; the concrete host path is resolved at instantiation and exposed
+    to the executor as a file reference (an env dependency, not a consumed
+    input slot)."""
+
+    ref_id: str
+    role: str
+    required: bool = True
+    description: str | None = None
+
+
 class BlueprintProvenance(BaseModel):
     source_card_id: str | None = None
     source_project_id: str | None = None
@@ -142,7 +155,7 @@ class CardBlueprint(BaseModel):
 
     blueprint_id: str
     version: str = "1.0.0"
-    schema_version: str = "card_blueprint.v1"
+    schema_version: str = "card_blueprint.v2"
     title: str
     summary: str = ""
     tags: list[str] = Field(default_factory=list)
@@ -156,10 +169,18 @@ class CardBlueprint(BaseModel):
         default_factory=BlueprintRuntimeRequirements,
     )
 
+    # Bundled reference-data dependencies (env-level, resolved to host paths at
+    # instantiation; not consumed input slots).
+    reference_assets: list[ReferenceAssetRef] = Field(default_factory=list)
+
     inputs_schema: list[BlueprintInputSchema] = Field(default_factory=list)
     outputs_schema: list[BlueprintOutputSchema] = Field(default_factory=list)
     parameters: list[BlueprintParameter] = Field(default_factory=list)
     instruction_blocks: list[str] = Field(default_factory=list)
+
+    # Free-form "when to use this card" hints, authored by the generalization
+    # agent, to improve manager retrieval/reuse.
+    use_cases: list[str] = Field(default_factory=list)
 
     provenance: BlueprintProvenance = Field(default_factory=BlueprintProvenance)
 
@@ -301,3 +322,5 @@ class UpdateProjectDraftRequest(BaseModel):
     instruction_blocks: list[str] | None = None
     python_packages: list[str] | None = None
     r_packages: list[str] | None = None
+    use_cases: list[str] | None = None
+    reference_assets: list[ReferenceAssetRef] | None = None

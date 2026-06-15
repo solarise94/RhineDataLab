@@ -10,6 +10,8 @@ import {
   ProjectDraftListResponse,
   ProjectDraftResponse,
   BlueprintReviewResult,
+  ReferenceDataKind,
+  ReferenceDataListResponse,
   UpdateProjectDraftRequest,
 } from "@/lib/types";
 
@@ -421,6 +423,38 @@ export function useDeleteProjectCardDraft(projectId: string) {
     mutationFn: (draftId: string) => api.deleteProjectCardDraft(projectId, draftId),
     onSuccess: async () => {
       await queryClient.invalidateQueries({ queryKey: queryKeys.projectCardLibrary(projectId) });
+    },
+  });
+}
+
+// ---------------------------------------------------------------------------
+// Reference data registry
+// ---------------------------------------------------------------------------
+
+export function useReferenceData() {
+  return useQuery<ReferenceDataListResponse>({
+    queryKey: queryKeys.referenceData,
+    queryFn: () => api.getReferenceData(),
+  });
+}
+
+export function useRegisterReferenceData() {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: (args: { file: File; name: string; kind: ReferenceDataKind; description?: string }) =>
+      api.registerReferenceDataUpload(args.file, { name: args.name, kind: args.kind, description: args.description }),
+    onSuccess: async () => {
+      await queryClient.invalidateQueries({ queryKey: queryKeys.referenceData });
+    },
+  });
+}
+
+export function useDeleteReferenceData() {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: (refId: string) => api.deleteReferenceData(refId),
+    onSuccess: async () => {
+      await queryClient.invalidateQueries({ queryKey: queryKeys.referenceData });
     },
   });
 }

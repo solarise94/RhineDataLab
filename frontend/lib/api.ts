@@ -53,6 +53,9 @@ import {
   BlueprintReviewResult,
   DraftStatus,
   UpdateProjectDraftRequest,
+  ReferenceDataEntry,
+  ReferenceDataKind,
+  ReferenceDataListResponse,
 } from "./types";
 import type { ChatTokenUsage } from "./types";
 
@@ -947,5 +950,50 @@ export const api = {
       `/projects/${projectId}/card-library/${draftId}`,
       { method: "DELETE" },
     );
+  },
+
+  // -----------------------------------------------------------------------
+  // Reference data registry (bundled env dependencies for analysis cards)
+  // -----------------------------------------------------------------------
+
+  getReferenceData() {
+    return request<ReferenceDataListResponse>("/reference-data");
+  },
+  async registerReferenceDataUpload(
+    file: File,
+    meta: { name: string; kind: ReferenceDataKind; description?: string },
+  ) {
+    const formData = new FormData();
+    formData.append("file", file);
+    formData.append("name", meta.name);
+    formData.append("kind", meta.kind);
+    if (meta.description) formData.append("description", meta.description);
+    const response = await fetch(uploadUrl("/reference-data"), {
+      method: "POST",
+      body: formData,
+      cache: "no-store",
+    });
+    if (!response.ok) {
+      const text = await response.text();
+      throw new Error(text || `Upload failed: ${response.status}`);
+    }
+    return (await response.json()) as { entry: ReferenceDataEntry };
+  },
+  registerReferenceDataFromPath(
+    sourcePath: string,
+    meta: { name: string; kind: ReferenceDataKind; description?: string },
+  ) {
+    return request<{ entry: ReferenceDataEntry }>("/reference-data/from-path", {
+      method: "POST",
+      body: JSON.stringify({ source_path: sourcePath, ...meta }),
+    });
+  },
+  deleteReferenceData(refId: string) {
+    return request<{ ok: boolean; ref_id: string }>(`/reference-data/${refId}`, {
+      method: "DELETE",
+    });
+  },
+  referenceDataDownloadUrl(refId: string) {
+    return uploadUrl(`/reference-data/${refId}/download`);
   },
 };

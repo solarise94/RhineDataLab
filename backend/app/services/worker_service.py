@@ -2426,6 +2426,34 @@ class WorkerService:
             active = self._active_run_statuses()
             return any(run.status in active for run in runs)
 
+    def diagnostic_run_state(self, project_id: str) -> dict:
+        """Return worker/queue state for diagnostic bundle. Best-effort, never raises."""
+        active_statuses = self._active_run_statuses()
+        max_concurrent = int(getattr(self.project_service.settings, "executor_max_concurrent_runs", 3))
+        try:
+            available_slots = int(self.get_available_run_slots(project_id))
+        except Exception:
+            available_slots = None
+        try:
+            lock = self.project_service.lock_for(project_id)
+            with lock:
+                runs = self.project_service.graph_store(project_id).load_runs()
+            active = [run for run in runs if run.status in active_statuses]
+        except Exception:
+            active = []
+        active_ids = [run.run_id for run in active]
+        stuck_ids = []
+        for run in active:
+            thread = self._threads.get(run.run_id)
+            if thread is None or not thread.is_alive():
+                stuck_ids.append(run.run_id)
+        return {
+            "max_concurrent": max_concurrent,
+            "available_slots": available_slots,
+            "active_run_ids": active_ids,
+            "stuck_run_ids": stuck_ids,
+        }
+
     def _run_status(self, project_id: str, run_id: str) -> str | None:
         lock = self.project_service.lock_for(project_id)
         with lock:

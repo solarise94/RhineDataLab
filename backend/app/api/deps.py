@@ -24,6 +24,7 @@ from app.services.runtime_dependency_job_service import RuntimeDependencyJobServ
 from app.services.runtime_dependency_resolver_service import RuntimeDependencyResolverService
 from app.services.runtime_approval_service import RuntimeApprovalService
 from app.services.card_library_service import CardLibraryService
+from app.services.reference_data_service import ReferenceDataService
 from app.services.worker_service import WorkerService
 
 
@@ -212,10 +213,17 @@ def get_card_library_service() -> CardLibraryService:
 
 
 @lru_cache
+def get_reference_data_service() -> ReferenceDataService:
+    return ReferenceDataService()
+
+
+@lru_cache
 def get_diagnostic_bundle_service() -> DiagnosticBundleService:
     return DiagnosticBundleService(
         get_project_service(),
         get_app_config_service(),
+        get_worker_service(),
+        get_settings(),
     )
 
 

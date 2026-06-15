@@ -43,7 +43,7 @@ const ARTIFACT_VIEWS = new Set(["results", "files", "report"]);
 
 const primary = [
   { href: "results", label: "文件管理", icon: Package },
-  { href: "card-library", label: "牌库", icon: Layers },
+  { href: "card-library", label: "分析卡", icon: Layers },
   { href: "capabilities", label: "能力中心", icon: Puzzle },
   { href: "settings", label: "工作台设置", icon: Settings2 },
 ];
@@ -390,43 +390,10 @@ export function SideNav({
           <FolderGit2 size={16} />
           <span>技术详情</span>
         </Link>
-        <Link
-          href={`/projects/${projectId}/global-card-library`}
-          className={`nav-link ${current === "global-card-library" ? "active" : ""}`}
-        >
-          <Layers size={16} />
-          <span>全局牌库管理</span>
-        </Link>
       </div>
 
       <div style={{ marginTop: "auto", paddingTop: 20 }}>
         {!isMobile ? <DependencyJobChip projectId={projectId} className="in-sidenav" /> : null}
-        <div
-          style={{
-            padding: "10px 12px",
-            borderRadius: 12,
-            background: "var(--green-bg)",
-            border: "1px solid var(--green-border)",
-            display: "flex",
-            alignItems: "center",
-            gap: 8,
-            fontSize: 12,
-            color: "var(--green-dark)",
-            fontWeight: 500,
-          }}
-        >
-          <span
-            style={{
-              width: 7,
-              height: 7,
-              borderRadius: "50%",
-              background: "var(--green)",
-              boxShadow: "0 0 6px rgba(34,197,94,0.4)",
-              flexShrink: 0,
-            }}
-          />
-          Manager AI 在线
-        </div>
       </div>
     </aside>
   );

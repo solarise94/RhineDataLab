@@ -722,6 +722,8 @@ export interface DiagnosticExportResponse {
   created_at: string;
   run_count: number;
   session_count: number;
+  bundle_size?: number;
+  bundle_size_label?: string;
 }
 
 export interface ProjectSnapshot {
@@ -856,6 +858,13 @@ export interface BlueprintProvenance {
   use_count: number;
 }
 
+export interface ReferenceAssetRef {
+  ref_id: string;
+  role: string;
+  required: boolean;
+  description: string | null;
+}
+
 export interface CardBlueprint {
   blueprint_id: string;
   version: string;
@@ -868,10 +877,12 @@ export interface CardBlueprint {
   skills: string[];
   mcp_servers: string[];
   runtime_requirements: BlueprintRuntimeRequirements;
+  reference_assets: ReferenceAssetRef[];
   inputs_schema: BlueprintInputSchema[];
   outputs_schema: BlueprintOutputSchema[];
   parameters: BlueprintParameter[];
   instruction_blocks: string[];
+  use_cases: string[];
   provenance: BlueprintProvenance;
 }
 
@@ -994,4 +1005,27 @@ export interface UpdateProjectDraftRequest {
   instruction_blocks?: string[];
   python_packages?: string[];
   r_packages?: string[];
+  use_cases?: string[];
+  reference_assets?: ReferenceAssetRef[];
+}
+
+// ---------------------------------------------------------------------------
+// Reference data registry (bundled env-level dependencies for analysis cards)
+// ---------------------------------------------------------------------------
+
+export type ReferenceDataKind = "gtf" | "fasta" | "index" | "annotation" | "table" | "other";
+
+export interface ReferenceDataEntry {
+  ref_id: string;
+  name: string;
+  kind: ReferenceDataKind;
+  sha256: string;
+  size: number;
+  original_filename: string;
+  description: string | null;
+  added_at: string;
+}
+
+export interface ReferenceDataListResponse {
+  entries: ReferenceDataEntry[];
 }

@@ -5,21 +5,19 @@ import { useSearchParams } from "next/navigation";
 import { SkillHubPanel } from "./SkillHubPanel";
 import { McpHubPanel } from "./McpHubPanel";
 import { CapabilityInstallPanel } from "./CapabilityInstallPanel";
-import { BlueprintDeckPanel } from "@/components/card-library/BlueprintDeckPanel";
-type Tab = "skills" | "mcp" | "install" | "deck";
+type Tab = "skills" | "mcp" | "install";
 
 const TABS: { key: Tab; label: string }[] = [
   { key: "skills", label: "Skills" },
   { key: "mcp", label: "MCP" },
   { key: "install", label: "Install" },
-  { key: "deck", label: "牌库" },
 ];
 
 interface CapabilitiesPanelProps {
   projectId: string;
 }
 
-const VALID_TABS = new Set<Tab>(["skills", "mcp", "install", "deck"]);
+const VALID_TABS = new Set<Tab>(["skills", "mcp", "install"]);
 
 export function CapabilitiesPanel({ projectId }: CapabilitiesPanelProps) {
   const searchParams = useSearchParams();
@@ -64,7 +62,6 @@ export function CapabilitiesPanel({ projectId }: CapabilitiesPanelProps) {
       {activeTab === "install" && (
         <CapabilityInstallPanel projectId={projectId} onInstalled={handleInstalled} />
       )}
-      {activeTab === "deck" && <BlueprintDeckPanel />}
     </div>
   );
 }

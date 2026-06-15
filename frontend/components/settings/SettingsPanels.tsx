@@ -1210,6 +1210,7 @@ export function SettingsPanels({
             <div><strong>导出时间</strong><span>{diagnosticInfo.created_at}</span></div>
             <div><strong>包含 runs</strong><span>{diagnosticInfo.run_count}</span></div>
             <div><strong>包含 sessions</strong><span>{diagnosticInfo.session_count}</span></div>
+            <div><strong>文件大小</strong><span>{diagnosticInfo.bundle_size_label ?? "—"}</span></div>
             <div><strong>保存路径</strong><span>{diagnosticInfo.path}</span></div>
           </div>
         ) : null}

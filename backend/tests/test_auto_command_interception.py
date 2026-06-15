@@ -142,6 +142,28 @@ class AutoCommandIntegrationTest(unittest.TestCase):
 
     def tearDown(self) -> None:
         self.settings.data_root = self._original_data_root
+        # Clear cached FastAPI dependency factories so later tests start with the correct settings.
+        from app.api.deps import (
+            get_app_config_service,
+            get_chat_session_service,
+            get_diagnostic_bundle_service,
+            get_manager_auto_service,
+            get_manager_command_service,
+            get_project_service,
+            get_runtime_dependency_job_service,
+            get_worker_service,
+        )
+        from app.core.config import get_settings
+
+        get_settings.cache_clear()
+        get_project_service.cache_clear()
+        get_app_config_service.cache_clear()
+        get_worker_service.cache_clear()
+        get_manager_auto_service.cache_clear()
+        get_chat_session_service.cache_clear()
+        get_manager_command_service.cache_clear()
+        get_runtime_dependency_job_service.cache_clear()
+        get_diagnostic_bundle_service.cache_clear()
         shutil.rmtree(self.tmpdir, ignore_errors=True)
 
     def _mock_stream_chat(self, project_id, chat_request):
