@@ -3,10 +3,13 @@
 from __future__ import annotations
 
 import json
+import os
 import shutil
+import subprocess
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 from app.core.config import Settings, get_settings
 from app.models.executor import ExecutorContext, ExecutorReference, RuntimeBindings
@@ -114,6 +117,30 @@ class TestCommandWorkerReferencePaths(_Base):
         )
         reference_paths = json.loads(spec.environment["BLUEPRINT_REFERENCE_PATHS"])
         self.assertEqual(reference_paths, {})
+
+
+class TestBwrapRuntimeSelection(_Base):
+    def tearDown(self):
+        from app.workers import command_worker
+
+        command_worker._BWRAP_SMOKE_CACHE.clear()
+        super().tearDown()
+
+    def test_ensure_bwrap_runtime_prefers_configured_env_var(self):
+        from app.workers import command_worker
+
+        command_worker._BWRAP_SMOKE_CACHE.clear()
+        with patch.dict(os.environ, {"BLUEPRINT_BWRAP_BIN": "/usr/bin/bwrap"}, clear=False), patch(
+            "app.workers.command_worker.shutil.which",
+            side_effect=lambda name: "/usr/bin/fallback-bwrap" if name == "bwrap" else None,
+        ), patch(
+            "app.workers.command_worker.subprocess.run",
+            return_value=subprocess.CompletedProcess(args=[], returncode=0),
+        ) as run_mock:
+            resolved = command_worker._ensure_bwrap_runtime()
+
+        self.assertEqual(resolved, "/usr/bin/bwrap")
+        self.assertEqual(run_mock.call_args.args[0][0], "/usr/bin/bwrap")
 
 
 if __name__ == "__main__":

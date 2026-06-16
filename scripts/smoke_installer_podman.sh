@@ -79,11 +79,19 @@ podman_exec() {
 select_default_installer() {
   local latest=""
   local candidate=""
-  while IFS= read -r candidate; do
-    latest="${candidate}"
-  done < <(find "${REPO_ROOT}/dist" -maxdepth 1 -type f -name 'blueprint-re-*-linux-x86_64.sh' | sort -V)
-  [[ -n "${latest}" ]] || die "No installer artifact found in ${REPO_ROOT}/dist"
-  printf '%s\n' "${latest}"
+  local pattern=""
+  for pattern in 'rhinedatalab-*-linux-x86_64.sh' 'blueprint-re-*-linux-x86_64.sh'; do
+    latest=""
+    while IFS= read -r candidate; do
+      latest="${candidate}"
+    done < <(find "${REPO_ROOT}/dist" -maxdepth 1 -type f -name "${pattern}" | sort -V)
+    if [[ -n "${latest}" ]]; then
+      printf '%s\n' "${latest}"
+      return 0
+    fi
+  done
+
+  die "No installer artifact found in ${REPO_ROOT}/dist"
 }
 
 build_image_if_needed() {

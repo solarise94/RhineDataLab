@@ -15,6 +15,7 @@ PI_BIN=""
 OPENCODE_BIN=""
 CLAUDE_BIN=""
 NGINX_BIN=""
+BWRAP_BIN=""
 DEPLOY_WARNINGS=()
 ALLOW_APT=0
 DEPLOY_MODE="build-if-changed"
@@ -488,8 +489,7 @@ install_runtime_dependencies() {
 }
 
 check_runtime_dependencies() {
-  local bwrap_bin
-  bwrap_bin="$(resolve_bin BLUEPRINT_BWRAP_BIN bwrap)" || { echo "Missing required runtime command: bwrap. See deploy/runtime-dependencies.yml." >&2; exit 1; }
+  BWRAP_BIN="$(resolve_bin BLUEPRINT_BWRAP_BIN bwrap)" || { echo "Missing required runtime command: bwrap. See deploy/runtime-dependencies.yml." >&2; exit 1; }
   for command_name in npm git systemctl; do
     if ! command -v "${command_name}" >/dev/null 2>&1; then
       echo "Missing required runtime command: ${command_name}. See deploy/runtime-dependencies.yml." >&2
@@ -504,7 +504,7 @@ check_runtime_dependencies() {
     echo "Python ${REQUIRED_PYTHON_VERSION}+ required. Found ${python_version} at ${PYTHON_BIN}" >&2
     exit 1
   fi
-  if ! "${bwrap_bin}" \
+  if ! "${BWRAP_BIN}" \
     --die-with-parent \
     --ro-bind /usr /usr \
     --ro-bind /bin /bin \
@@ -648,6 +648,7 @@ PY
     "BLUEPRINT_DEFAULT_PYTHON_RUNTIME=${BLUEPRINT_DEFAULT_PYTHON_RUNTIME:-${DEFAULT_PYTHON_RUNTIME}}" \
     "BLUEPRINT_DEFAULT_R_RUNTIME=${BLUEPRINT_DEFAULT_R_RUNTIME:-${DEFAULT_R_RUNTIME}}" \
     "BLUEPRINT_EXECUTOR_CONDA_BASE=${BLUEPRINT_EXECUTOR_CONDA_BASE:-${CONDA_BASE}}" \
+    "BLUEPRINT_BWRAP_BIN=${BLUEPRINT_BWRAP_BIN:-${BWRAP_BIN}}" \
     "BLUEPRINT_EXECUTOR_MAMBA_ROOT_PREFIX=${BLUEPRINT_EXECUTOR_MAMBA_ROOT_PREFIX:-${MAMBA_ROOT_PREFIX:-${BLUEPRINT_EXECUTOR_CONDA_BASE:-${CONDA_BASE}}}}" \
     "BLUEPRINT_EXECUTOR_MAMBARC=${BLUEPRINT_EXECUTOR_MAMBARC:-${MAMBARC:-}}" \
     "BLUEPRINT_CRAN_MIRROR=${BLUEPRINT_CRAN_MIRROR:-}" \

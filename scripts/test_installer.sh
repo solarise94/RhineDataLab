@@ -1140,6 +1140,44 @@ rm -rf "${PUBLISH_TMP}"
 echo ""
 
 # ---------------------------------------------------------------------------
+# Test 32: installer bwrap fallback wiring
+# ---------------------------------------------------------------------------
+echo "Test 32: installer bwrap fallback wiring"
+
+assert "install.sh selects a working bwrap candidate" \
+  "grep -q 'select_working_bwrap()' ${SCRIPT_DIR}/install.sh"
+assert "install.sh exports working bwrap into release deploy env" \
+  "grep -q 'BLUEPRINT_BWRAP_BIN=.*WORKING_BWRAP_BIN' ${SCRIPT_DIR}/install.sh"
+assert "install.sh warns when bundled bwrap falls back to host bwrap" \
+  "grep -q 'Bundled bwrap cannot create a sandbox on this host' ${SCRIPT_DIR}/install.sh"
+
+echo ""
+
+# ---------------------------------------------------------------------------
+# Test 33: backend env preserves explicit bwrap path
+# ---------------------------------------------------------------------------
+echo "Test 33: backend env preserves explicit bwrap path"
+
+assert "deploy_release.sh writes BLUEPRINT_BWRAP_BIN into backend.env" \
+  "grep -q 'write_env_line .*BLUEPRINT_BWRAP_BIN' ${SCRIPT_DIR}/deploy_release.sh"
+assert "deploy_user_systemd.sh writes BLUEPRINT_BWRAP_BIN into backend.env" \
+  "grep -q 'BLUEPRINT_BWRAP_BIN=' ${SCRIPT_DIR}/deploy_user_systemd.sh"
+
+echo ""
+
+# ---------------------------------------------------------------------------
+# Summary
+# ---------------------------------------------------------------------------
+echo "Test 34: podman smoke defaults to public installer artifact"
+
+assert "smoke_installer_podman.sh prefers rhinedatalab installers" \
+  "grep -q \"rhinedatalab-\\*-linux-x86_64.sh' 'blueprint-re-\\*-linux-x86_64.sh\" ${SCRIPT_DIR}/smoke_installer_podman.sh"
+assert "smoke_installer_podman.sh still falls back to blueprint-re installers" \
+  "grep -q \"blueprint-re-\\*-linux-x86_64.sh\" ${SCRIPT_DIR}/smoke_installer_podman.sh"
+
+echo ""
+
+# ---------------------------------------------------------------------------
 # Summary
 # ---------------------------------------------------------------------------
 echo "========================================"

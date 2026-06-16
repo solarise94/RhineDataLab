@@ -122,6 +122,21 @@ require_cmd() {
 }
 
 # Run bwrap with classified diagnostics. Exits on failure.
+bwrap_full_sandbox_smoke() {
+  local bwrap_bin="$1"
+  [[ -x "${bwrap_bin}" ]] || return 1
+  "${bwrap_bin}" \
+    --die-with-parent \
+    --ro-bind /usr /usr \
+    --ro-bind /bin /bin \
+    --ro-bind-try /lib /lib \
+    --ro-bind-try /lib64 /lib64 \
+    --proc /proc \
+    --dev /dev \
+    --tmpfs /tmp \
+    -- /bin/true >/dev/null 2>&1
+}
+
 bwrap_smoke_test() {
   local bwrap_bin="$1"
   local test_label="$2"
@@ -153,6 +168,21 @@ bwrap_smoke_test() {
   die "bubblewrap smoke test failed. Sandbox cannot operate on this host."
 }
 
+select_working_bwrap() {
+  local bundled_bwrap="$1"
+  local host_bwrap="$2"
+  local configured_bwrap="${BLUEPRINT_BWRAP_BIN:-}"
+  local candidate
+  for candidate in "${configured_bwrap}" "${bundled_bwrap}" "${host_bwrap}"; do
+    [[ -n "${candidate}" ]] || continue
+    if bwrap_full_sandbox_smoke "${candidate}"; then
+      printf '%s\n' "${candidate}"
+      return 0
+    fi
+  done
+  return 1
+}
+
 version_gte() {
   local actual="$1"
   local required="$2"
@@ -176,7 +206,7 @@ export_runtime_bin_env() {
   export BLUEPRINT_NODE_BIN="${ENV_NODE}"
   export BLUEPRINT_NPM_BIN="${ENV_NPM}"
   export BLUEPRINT_NGINX_BIN="${ENV_NGINX}"
-  export BLUEPRINT_BWRAP_BIN="${ENV_BWRAP}"
+  export BLUEPRINT_BWRAP_BIN="${WORKING_BWRAP_BIN:-${ENV_BWRAP:-}}"
   export BLUEPRINT_GIT_BIN="${ENV_GIT}"
   export BLUEPRINT_EXECUTOR_MAMBA_ROOT_PREFIX="${BLUEPRINT_EXECUTOR_MAMBA_ROOT_PREFIX:-}"
   export BLUEPRINT_EXECUTOR_MAMBARC="${BLUEPRINT_EXECUTOR_MAMBARC:-}"
@@ -197,13 +227,20 @@ run_deploy() {
 run_deploy_for_release() {
   local release_dir="$1"
   shift
+  local rollback_bwrap="${WORKING_BWRAP_BIN:-${BLUEPRINT_BWRAP_BIN:-}}"
+  if [[ -z "${rollback_bwrap}" ]]; then
+    rollback_bwrap="$(command -v bwrap 2>/dev/null || true)"
+  fi
+  if [[ -z "${rollback_bwrap}" ]]; then
+    rollback_bwrap="${ENV_DIR}/bin/bwrap"
+  fi
   export BLUEPRINT_RELEASE_ROOT="${release_dir}"
   export BLUEPRINT_DATA_ROOT="${DATA_ROOT}"
   export BLUEPRINT_PYTHON_BIN="${ENV_DIR}/bin/python"
   export BLUEPRINT_NODE_BIN="${ENV_DIR}/bin/node"
   export BLUEPRINT_NPM_BIN="${ENV_DIR}/bin/npm"
   export BLUEPRINT_NGINX_BIN="${ENV_DIR}/bin/nginx"
-  export BLUEPRINT_BWRAP_BIN="${ENV_DIR}/bin/bwrap"
+  export BLUEPRINT_BWRAP_BIN="${rollback_bwrap}"
   export BLUEPRINT_GIT_BIN="${ENV_DIR}/bin/git"
   bash "${release_dir}/scripts/deploy_release.sh" "$@"
 }
@@ -697,18 +734,24 @@ ENV_NPM="${ENV_DIR}/bin/npm"
 ENV_NGINX="${ENV_DIR}/bin/nginx"
 ENV_BWRAP="${ENV_DIR}/bin/bwrap"
 ENV_GIT="${ENV_DIR}/bin/git"
+HOST_BWRAP="$(command -v bwrap 2>/dev/null || true)"
+WORKING_BWRAP_BIN=""
 
-for bin_path in "${ENV_PYTHON}" "${ENV_NODE}" "${ENV_NPM}" "${ENV_NGINX}" "${ENV_BWRAP}" "${ENV_GIT}"; do
+for bin_path in "${ENV_PYTHON}" "${ENV_NODE}" "${ENV_NPM}" "${ENV_NGINX}" "${ENV_GIT}"; do
   if [[ ! -x "${bin_path}" ]]; then
     die "Expected binary missing after environment creation: ${bin_path}"
   fi
 done
+if [[ ! -x "${ENV_BWRAP}" ]]; then
+  warn "Bundled bwrap not found in release env; will fall back to host bwrap if available."
+fi
 
 info "Python:  ${ENV_PYTHON} ($("${ENV_PYTHON}" --version))"
 info "Node:    ${ENV_NODE} ($("${ENV_NODE}" -v))"
 info "npm:     ${ENV_NPM}"
 info "nginx:   ${ENV_NGINX}"
-info "bwrap:   ${ENV_BWRAP}"
+[[ -x "${ENV_BWRAP}" ]] && info "bundled bwrap: ${ENV_BWRAP}"
+[[ -n "${HOST_BWRAP}" ]] && info "host bwrap:    ${HOST_BWRAP}"
 info "git:     ${ENV_GIT}"
 
 # ---------------------------------------------------------------------------
@@ -717,17 +760,37 @@ info "git:     ${ENV_GIT}"
 
 info "Phase 6b: Running bubblewrap smoke test"
 
-bwrap_smoke_test "${ENV_BWRAP}" "full sandbox" \
-  --die-with-parent \
-  --ro-bind /usr /usr \
-  --ro-bind /bin /bin \
-  --ro-bind-try /lib /lib \
-  --ro-bind-try /lib64 /lib64 \
-  --proc /proc \
-  --dev /dev \
-  --tmpfs /tmp
+WORKING_BWRAP_BIN="$(select_working_bwrap "${ENV_BWRAP}" "${HOST_BWRAP}" || true)"
+if [[ -z "${WORKING_BWRAP_BIN}" ]]; then
+  if [[ -x "${ENV_BWRAP}" ]]; then
+    bwrap_smoke_test "${ENV_BWRAP}" "full sandbox" \
+      --die-with-parent \
+      --ro-bind /usr /usr \
+      --ro-bind /bin /bin \
+      --ro-bind-try /lib /lib \
+      --ro-bind-try /lib64 /lib64 \
+      --proc /proc \
+      --dev /dev \
+      --tmpfs /tmp
+  elif [[ -n "${HOST_BWRAP}" ]]; then
+    bwrap_smoke_test "${HOST_BWRAP}" "full sandbox" \
+      --die-with-parent \
+      --ro-bind /usr /usr \
+      --ro-bind /bin /bin \
+      --ro-bind-try /lib /lib \
+      --ro-bind-try /lib64 /lib64 \
+      --proc /proc \
+      --dev /dev \
+      --tmpfs /tmp
+  else
+    die "No bubblewrap executable is available on this host."
+  fi
+fi
 
-info "bubblewrap smoke test passed."
+if [[ "${WORKING_BWRAP_BIN}" != "${ENV_BWRAP}" ]]; then
+  warn "Bundled bwrap cannot create a sandbox on this host; falling back to ${WORKING_BWRAP_BIN}."
+fi
+info "bubblewrap smoke test passed via ${WORKING_BWRAP_BIN}."
 
 # ---------------------------------------------------------------------------
 # Phase 7: Install backend wheel into the environment

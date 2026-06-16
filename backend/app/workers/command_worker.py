@@ -14,15 +14,31 @@ from app.models.runs import TaskPacket
 from app.workers.base import PermissionRequest, WorkerAdapter, WorkerLaunchSpec
 
 
-_BWRAP_SMOKE_OK: bool | None = None
+_BWRAP_SMOKE_CACHE: dict[str, bool] = {}
 
 
 def _ensure_bwrap_runtime() -> str:
-    global _BWRAP_SMOKE_OK
-    bwrap = shutil.which("bwrap")
+    configured = str(os.environ.get("BLUEPRINT_BWRAP_BIN", "") or "").strip()
+    if configured:
+        if os.path.sep in configured:
+            bwrap = os.path.expanduser(configured)
+            if not os.path.exists(bwrap):
+                raise RuntimeError(
+                    "BLUEPRINT_EXECUTOR_SANDBOX_MODE=bwrap was configured with "
+                    f"BLUEPRINT_BWRAP_BIN={configured!r}, but that path does not exist."
+                )
+        else:
+            bwrap = shutil.which(configured)
+            if not bwrap:
+                raise RuntimeError(
+                    "BLUEPRINT_EXECUTOR_SANDBOX_MODE=bwrap was configured with "
+                    f"BLUEPRINT_BWRAP_BIN={configured!r}, but that command was not found in PATH."
+                )
+    else:
+        bwrap = shutil.which("bwrap")
     if not bwrap:
         raise RuntimeError("BLUEPRINT_EXECUTOR_SANDBOX_MODE=bwrap requires the bubblewrap executable (bwrap).")
-    if _BWRAP_SMOKE_OK is None:
+    if bwrap not in _BWRAP_SMOKE_CACHE:
         result = subprocess.run(
             [
                 bwrap,
@@ -52,8 +68,8 @@ def _ensure_bwrap_runtime() -> str:
             stderr=subprocess.DEVNULL,
             check=False,
         )
-        _BWRAP_SMOKE_OK = result.returncode == 0
-    if not _BWRAP_SMOKE_OK:
+        _BWRAP_SMOKE_CACHE[bwrap] = result.returncode == 0
+    if not _BWRAP_SMOKE_CACHE[bwrap]:
         raise RuntimeError(
             "BLUEPRINT_EXECUTOR_SANDBOX_MODE=bwrap requires a working bubblewrap namespace. "
             "Run scripts/deploy_user_systemd.sh and fix deploy/runtime-dependencies.yml requirements."
