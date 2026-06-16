@@ -1670,7 +1670,12 @@ class ManagerBlueprintTools:
                     "started_at": started_at,
                     "finished_at": utc_now(),
                 }
-            resolved_runtime, conda_bin = self._resolve_runtime_and_solver(runtime, ecosystem)
+            # _resolve_runtime_and_solver returns Path objects. Coerce to str
+            # up-front so the value is JSON-serializable when it lands in the
+            # job result dict that RuntimeDependencyJobService persists. The
+            # pip and cran/bioconductor paths already do this via str(env_path).
+            env_path, conda_bin = self._resolve_runtime_and_solver(runtime, ecosystem)
+            resolved_runtime = str(env_path)
             effective_channels = list(channels or [])
             if ecosystem.lower() == "r":
                 lower_set = {c.lower() for c in effective_channels}
@@ -1678,7 +1683,7 @@ class ManagerBlueprintTools:
                     effective_channels.append("conda-forge")
                 if "bioconda" not in lower_set:
                     effective_channels.append("bioconda")
-            command = [str(conda_bin), "install", "-y", "-p", str(resolved_runtime)]
+            command = [str(conda_bin), "install", "-y", "-p", resolved_runtime]
             for ch in effective_channels:
                 command.extend(["-c", ch])
             command.extend(conda_packages)
@@ -1687,7 +1692,7 @@ class ManagerBlueprintTools:
                 command,
                 ecosystem=ecosystem,
                 runtime=runtime,
-                resolved_runtime=resolved_runtime or "",
+                resolved_runtime=resolved_runtime,
                 packages=packages,
                 manager_name=manager_name,
                 timeout=timeout,

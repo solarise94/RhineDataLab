@@ -17,7 +17,13 @@ def atomic_write_json(path: Path, payload: object) -> None:
     fd, tmp_name = tempfile.mkstemp(dir=path.parent, prefix=f".{path.name}.", suffix=".tmp")
     try:
         with os.fdopen(fd, "w", encoding="utf-8") as handle:
-            json.dump(payload, handle, ensure_ascii=False, indent=2)
+            # ``default=str`` is a defensive safety net: callers should keep
+            # payloads JSON-native, but a stray pathlib.Path or datetime must
+            # never prevent durable state (e.g. dependency job records) from
+            # being persisted. See the resolved_runtime serialization bug that
+            # left successful dependency installs stuck in an un-persistable
+            # terminal state.
+            json.dump(payload, handle, ensure_ascii=False, indent=2, default=str)
             handle.write("\n")
         os.replace(tmp_name, path)
     finally:
