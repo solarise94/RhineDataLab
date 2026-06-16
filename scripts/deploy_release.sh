@@ -56,6 +56,16 @@ warn_deploy() {
   DEPLOY_WARNINGS+=("$1")
 }
 
+ensure_user_service_enabled() {
+  local service_name="$1"
+  if ! systemctl --user reenable "${service_name}" >/dev/null 2>&1; then
+    systemctl --user enable "${service_name}" >/dev/null 2>&1 || \
+      die "Failed to enable ${service_name}"
+  fi
+  systemctl --user is-enabled "${service_name}" >/dev/null 2>&1 || \
+    die "Service ${service_name} is not enabled after deploy"
+}
+
 version_gte() {
   local actual="$1"
   local required="$2"
@@ -787,10 +797,10 @@ render_template "${SYSTEMD_TEMPLATE_DIR}/blueprint-re-nginx.service" \
 # ---------------------------------------------------------------------------
 
 systemctl --user daemon-reload
-systemctl --user enable blueprint-re-manager-agent.service
-systemctl --user enable blueprint-re-backend.service
-systemctl --user enable blueprint-re-frontend.service
-systemctl --user enable blueprint-re-nginx.service
+ensure_user_service_enabled blueprint-re-manager-agent.service
+ensure_user_service_enabled blueprint-re-backend.service
+ensure_user_service_enabled blueprint-re-frontend.service
+ensure_user_service_enabled blueprint-re-nginx.service
 
 if [[ "${IS_UPGRADE}" -eq 1 ]]; then
   if [[ "${SERVICES_STOPPED}" -eq 1 ]]; then

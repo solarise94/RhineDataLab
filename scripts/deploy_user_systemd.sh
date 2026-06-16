@@ -96,6 +96,20 @@ find_optional_bin() {
   command -v "${name}" 2>/dev/null || true
 }
 
+ensure_user_service_enabled() {
+  local service_name="$1"
+  if ! systemctl --user reenable "${service_name}" >/dev/null 2>&1; then
+    systemctl --user enable "${service_name}" >/dev/null 2>&1 || {
+      echo "Failed to enable ${service_name}" >&2
+      exit 1
+    }
+  fi
+  systemctl --user is-enabled "${service_name}" >/dev/null 2>&1 || {
+    echo "Service ${service_name} is not enabled after deploy" >&2
+    exit 1
+  }
+}
+
 # Resolve binary: explicit env var > command -v.
 resolve_bin() {
   local env_var_name="$1"
@@ -767,10 +781,10 @@ EOF
   sed -e "s|__NGINX_BIN__|${NGINX_BIN}|g" -e "s|__APP_ENV_DIR__|${APP_ENV_DIR}|g" "${ROOT_DIR}/deploy/systemd/blueprint-re-nginx.service" > "${SYSTEMD_USER_DIR}/blueprint-re-nginx.service"
 
   systemctl --user daemon-reload
-  systemctl --user enable blueprint-re-manager-agent.service
-  systemctl --user enable blueprint-re-backend.service
-  systemctl --user enable blueprint-re-frontend.service
-  systemctl --user enable blueprint-re-nginx.service
+  ensure_user_service_enabled blueprint-re-manager-agent.service
+  ensure_user_service_enabled blueprint-re-backend.service
+  ensure_user_service_enabled blueprint-re-frontend.service
+  ensure_user_service_enabled blueprint-re-nginx.service
 fi
 
 # Report current port occupants before shutdown so conflicts are visible

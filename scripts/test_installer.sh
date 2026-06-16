@@ -1178,6 +1178,22 @@ assert "smoke_installer_podman.sh still falls back to blueprint-re installers" \
 echo ""
 
 # ---------------------------------------------------------------------------
+# Test 35: deploy scripts verify user services remain enabled
+# ---------------------------------------------------------------------------
+echo "Test 35: deploy scripts verify user services remain enabled"
+
+assert "deploy_release.sh re-enables user services defensively" \
+  "grep -q 'systemctl --user reenable' ${SCRIPT_DIR}/deploy_release.sh"
+assert "deploy_release.sh verifies is-enabled after reenable" \
+  "grep -q 'is not enabled after deploy' ${SCRIPT_DIR}/deploy_release.sh"
+assert "deploy_user_systemd.sh re-enables user services defensively" \
+  "grep -q 'systemctl --user reenable' ${SCRIPT_DIR}/deploy_user_systemd.sh"
+assert "deploy_user_systemd.sh verifies is-enabled after reenable" \
+  "grep -q 'is not enabled after deploy' ${SCRIPT_DIR}/deploy_user_systemd.sh"
+
+echo ""
+
+# ---------------------------------------------------------------------------
 # Summary
 # ---------------------------------------------------------------------------
 echo "========================================"
