@@ -159,7 +159,6 @@ export function ProjectWorkspace({ projectId, view }: { projectId: string; view:
   const setArtifactPreviewError = useWorkspaceUiStore((s) => s.setArtifactPreviewError);
   const addAttachment = useWorkspaceUiStore((s) => s.addAttachment);
   const setDraftMessage = useWorkspaceUiStore((s) => s.setDraftMessage);
-  const dependencyJobs = useWorkspaceUiStore((s) => s.dependencyJobsByProject[projectId] ?? EMPTY_DEPENDENCY_JOBS);
   const registerDependencyJob = useWorkspaceUiStore((s) => s.registerDependencyJob);
   const updateDependencyJob = useWorkspaceUiStore((s) => s.updateDependencyJob);
   const removeDependencyJob = useWorkspaceUiStore((s) => s.removeDependencyJob);
@@ -303,7 +302,7 @@ export function ProjectWorkspace({ projectId, view }: { projectId: string; view:
             // Ignore manually resolved jobs to avoid re-showing the failure notice or chip.
             if (eventPayload.resolution_status === "manually_resolved") {
               const currentNotice = noticeRef.current;
-              if (currentNotice && currentNotice.startsWith("Dependency install failed")) {
+              if (currentNotice && currentNotice.startsWith("Dependency install failed") && currentNotice !== null) {
                 setNotice(projectId, null);
               }
               if (jobId) {
@@ -322,9 +321,11 @@ export function ProjectWorkspace({ projectId, view }: { projectId: string; view:
               } else {
                 noticeText = `Dependency install failed: ${msg || pkg}`.trim();
               }
-              setNotice(projectId, noticeText);
+              if (noticeRef.current !== noticeText) {
+                setNotice(projectId, noticeText);
+              }
               if (jobId) {
-                const existing = dependencyJobs[jobId];
+                const existing = useWorkspaceUiStore.getState().dependencyJobsByProject[projectId]?.[jobId];
                 if (!existing) {
                   registerDependencyJob(projectId, {
                     jobId,
@@ -354,9 +355,11 @@ export function ProjectWorkspace({ projectId, view }: { projectId: string; view:
             } else {
               noticeText = "Dependency install completed.";
             }
-            setNotice(projectId, noticeText);
+            if (noticeRef.current !== noticeText) {
+              setNotice(projectId, noticeText);
+            }
             if (jobId) {
-              const existing = dependencyJobs[jobId];
+              const existing = useWorkspaceUiStore.getState().dependencyJobsByProject[projectId]?.[jobId];
               if (!existing) {
                 registerDependencyJob(projectId, {
                   jobId,
@@ -389,7 +392,7 @@ export function ProjectWorkspace({ projectId, view }: { projectId: string; view:
             ]);
             const phase = eventPayload.phase || raw.job_status;
             if (jobId && phase && activeStatuses.has(phase)) {
-              const existing = dependencyJobs[jobId];
+              const existing = useWorkspaceUiStore.getState().dependencyJobsByProject[projectId]?.[jobId];
               if (!existing) {
                 registerDependencyJob(projectId, {
                   jobId,

@@ -1,6 +1,6 @@
 "use client";
 
-import { CSSProperties, useEffect, useMemo, useRef, useState } from "react";
+import { CSSProperties, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { useMutation, useQueryClient } from "@tanstack/react-query";
 import {
   AlertTriangle,
@@ -243,6 +243,22 @@ function formatElapsedTime(startedAt?: number, endedAt?: number) {
   const seconds = totalSeconds % 60;
   if (minutes > 0) return `${minutes} 分 ${seconds} 秒`;
   return `${seconds} 秒`;
+}
+
+function RunningToolTimer({ startedAt, label }: { startedAt: number; label: string }) {
+  const [now, setNow] = useState(Date.now());
+  useEffect(() => {
+    const id = window.setInterval(() => setNow(Date.now()), 1_000);
+    return () => window.clearInterval(id);
+  }, []);
+  const elapsed = formatElapsedTime(startedAt, now);
+  return (
+    <span className="manager-tool-divider-label">
+      <Loader2 size={12} className="spinning" style={{ marginRight: 6 }} />
+      {label}
+      {elapsed ? ` ${elapsed}` : ""}
+    </span>
+  );
 }
 
 function isNearBottom(element: HTMLElement, threshold = 48) {
@@ -491,34 +507,18 @@ function toHistoryContent(message: ChatMessage): string {
 }
 
 function sessionMessagesSignature(messages: ChatMessage[]): string {
-  return JSON.stringify(
-    messages.map((message) => ({
-      id: message.id,
-      role: message.role,
-      content: message.content,
-      proposal_id: message.proposal?.proposal_id ?? null,
-      proposal_status: message.proposal?.status ?? null,
-      thinking: message.thinking ?? null,
-      attachments: message.attachments ?? [],
-      state: message.state ?? null,
-      token_usage: message.tokenUsage
-        ? {
-            total_tokens: message.tokenUsage.total_tokens,
-            context_window_tokens: message.tokenUsage.context_window_tokens ?? null,
-          }
-        : null,
-      timeline: message.timeline?.map((item) => ({
-        id: item.id,
-        kind: item.kind,
-        content: item.content ?? null,
-        label: item.label ?? null,
-        toolName: item.toolName ?? null,
-        status: item.status,
-        startedAt: item.startedAt ?? null,
-        endedAt: item.endedAt ?? null,
-      })) ?? [],
-    })),
-  );
+  // Lightweight, O(1) signature for the hydrate/save bail-out checks.
+  // The old implementation projected every message's full content and timeline
+  // and then JSON.stringify'd the whole list, which dominated CPU during SSE
+  // bursts (71 messages / 447 timeline items in the reported incident).
+  const last = messages[messages.length - 1];
+  const lastTimeline = last?.timeline?.[last.timeline.length - 1];
+  return `${messages.length}:${last?.id ?? ""}:${last?.content.length ?? 0}:${last?.thinking?.length ?? 0}:${last?.timeline?.length ?? 0}:${lastTimeline?.id ?? ""}:${last?.state ?? ""}`;
+}
+
+function messageSignature(message: ChatMessage): string {
+  const last = message.timeline?.[message.timeline.length - 1];
+  return `${message.id}:${message.role}:${message.content.length}:${message.thinking?.length ?? -1}:${message.state ?? ""}:${message.proposal?.proposal_id ?? ""}:${message.proposal?.status ?? ""}:${message.attachments?.length ?? 0}:${message.timeline?.length ?? 0}:${last?.id ?? ""}:${last?.content?.length ?? 0}:${last?.status ?? ""}`;
 }
 
 function upsertSessionSummary(
@@ -577,6 +577,7 @@ export function ManagerChatPanel({
   const textareaRef = useRef<HTMLTextAreaElement>(null);
   const effortMenuRef = useRef<HTMLDivElement>(null);
   const thinkingRefs = useRef<Record<string, HTMLDivElement | null>>({});
+  const pinnedThinkingLengthsRef = useRef<Record<string, number>>({});
   const refreshTimerRef = useRef<number | null>(null);
   const delayedRefreshTimerRef = useRef<number | null>(null);
   const asyncBoundaryPollRef = useRef<number | null>(null);
@@ -766,8 +767,16 @@ export function ManagerChatPanel({
     if (!element || !shouldStickToBottomRef.current) {
       return;
     }
-    element.scrollTop = element.scrollHeight;
-  }, [sessionId, messages, error, busy, attachments, chatSessionQuery.isLoading]);
+    // Defer the scroll decision until after layout settles. During re-render
+    // bursts the browser can synthesize transient scroll events that briefly
+    // read as "near bottom"; waiting for the next animation frame lets the
+    // real layout stabilize before we yank the view to the bottom.
+    const frame = requestAnimationFrame(() => {
+      if (!shouldStickToBottomRef.current || !scrollRef.current) return;
+      scrollRef.current.scrollTop = scrollRef.current.scrollHeight;
+    });
+    return () => cancelAnimationFrame(frame);
+  }, [sessionId, messages]);
 
   useEffect(() => {
     if (draftMessage) {
@@ -1038,15 +1047,21 @@ export function ManagerChatPanel({
   }, []);
 
   useEffect(() => {
+    if (!shouldStickToBottomRef.current) return;
     messages.forEach((message) => {
       if (message.role !== "manager") return;
       (message.timeline ?? [])
         .filter((item) => item.kind === "thinking" && item.content)
         .forEach((item) => {
           const element = thinkingRefs.current[item.id];
-          if (element) {
-            element.scrollTop = element.scrollHeight;
-          }
+          if (!element) return;
+          // Pin each thinking panel to the bottom once per content length.
+          // Re-pinning on every messages change caused O(all-thinking-items) DOM
+          // writes during SSE bursts.
+          const contentLength = item.content!.length;
+          if (pinnedThinkingLengthsRef.current[item.id] === contentLength) return;
+          element.scrollTop = element.scrollHeight;
+          pinnedThinkingLengthsRef.current[item.id] = contentLength;
         });
     });
   }, [messages]);
@@ -2160,7 +2175,14 @@ export function ManagerChatPanel({
       title: `DeepSeek context window: ${sourceLabel}，当前约 ${historyTokens.toLocaleString()} tokens，剩余约 ${remainingTokens.toLocaleString()} tokens。上下文窗口 ${contextLimit.toLocaleString()} tokens。`,
     };
   }, [attachments, draft, messages]);
-  const displayMessages = messages.length ? messages : [DEFAULT_MANAGER_MESSAGE];
+  const displayMessages = useMemo(() => (messages.length ? messages : [DEFAULT_MANAGER_MESSAGE]), [messages]);
+  // Cache per-message render output keyed by messageSignature so an unchanged
+  // message reuses its previous ReactNode instead of being re-rendered. This
+  // replaces a broken memo() attempt: defining a memoized component inside the
+  // render body re-creates the component type every render, causing React to
+  // unmount/remount the whole list (worse than no memo). The cache is a plain
+  // ref so it never triggers re-renders by itself.
+  const messageRenderCacheRef = useRef<Map<string, { sig: string; node: ReactNode }>>(new Map());
   const sessionLoadError = chatSessionQuery.error instanceof Error ? chatSessionQuery.error.message : null;
   const sessionBusy = !sessionId || chatSessionQuery.isLoading;
   const composerInputDisabled = sessionBusy || Boolean(sessionLoadError) || autoScopedActive;
@@ -2250,10 +2272,15 @@ export function ManagerChatPanel({
     }
     if (item.kind === "tool") {
       const label = item.label || (item.status === "running" ? "正在执行工具" : "已完成工具调用");
+      const running = item.status === "running";
       return (
         <div key={item.id} className={`manager-tool-divider ${item.status ?? "done"}`}>
           <div className="manager-tool-divider-main">
-            <span className="manager-tool-divider-label">{label}</span>
+            {running && item.startedAt ? (
+              <RunningToolTimer startedAt={item.startedAt} label={label} />
+            ) : (
+              <span className="manager-tool-divider-label">{label}</span>
+            )}
             <span className="manager-tool-divider-line" />
           </div>
           {item.content ? <div className="manager-tool-report">{item.content}</div> : null}
@@ -2302,6 +2329,50 @@ export function ManagerChatPanel({
     );
   }
 
+  // Render one message, reusing a cached ReactNode when messageSignature is
+  // unchanged. Defining a memo() component inside the render body would
+  // re-create its type every render and force React to unmount/remount the
+  // whole row; the ref cache avoids that while still skipping unchanged rows.
+  const renderMessageRow = (message: ChatMessage): ReactNode => {
+    const sig = messageSignature(message);
+    const cache = messageRenderCacheRef.current;
+    const cached = cache.get(message.id);
+    if (cached && cached.sig === sig) {
+      return cached.node;
+    }
+    const node = (
+      <div key={message.id} className={`manager-message-row ${message.role}`}>
+        <div className={`manager-message-content ${message.role}`}>
+          {message.role === "user" ? renderMessageAttachments(message) : null}
+          <div className="manager-message-stack">
+            {(() => {
+              if (message.timeline?.length) {
+                return message.timeline.map((item) => renderTimelineItem(message, item));
+              }
+              if (message.thinkingState === "running" && message.thinking) {
+                return renderTimelineItem(message, {
+                  id: `${message.id}_thinking_fallback`,
+                  kind: "thinking",
+                  content: message.thinking,
+                  status: "running",
+                });
+              }
+              return renderTimelineItem(message, {
+                id: `${message.id}_fallback`,
+                kind: "text" as const,
+                content: message.content,
+                status: "done" as const,
+              });
+            })()}
+          </div>
+          {message.role === "manager" ? renderMessageAttachments(message) : null}
+        </div>
+      </div>
+    );
+    cache.set(message.id, { sig, node });
+    return node;
+  };
+
   return (
     <section className="manager-chat-panel" style={{ maxHeight: "calc(100vh - 140px)" }}>
       <div className="manager-chat-body">
@@ -2320,35 +2391,7 @@ export function ManagerChatPanel({
           ) : sessionLoadError ? (
             <div className="manager-session-empty">当前 session 加载失败：{sessionLoadError}</div>
           ) : (
-            displayMessages.map((message) => (
-              <div key={message.id} className={`manager-message-row ${message.role}`}>
-                <div className={`manager-message-content ${message.role}`}>
-                {message.role === "user" ? renderMessageAttachments(message) : null}
-                  <div className="manager-message-stack">
-                    {(() => {
-                      if (message.timeline?.length) {
-                        return message.timeline.map((item) => renderTimelineItem(message, item));
-                      }
-                      if (message.thinkingState === "running" && message.thinking) {
-                        return renderTimelineItem(message, {
-                          id: `${message.id}_thinking_fallback`,
-                          kind: "thinking",
-                          content: message.thinking,
-                          status: "running",
-                        });
-                      }
-                      return renderTimelineItem(message, {
-                        id: `${message.id}_fallback`,
-                        kind: "text" as const,
-                        content: message.content,
-                        status: "done" as const,
-                      });
-                    })()}
-                  </div>
-                {message.role === "manager" ? renderMessageAttachments(message) : null}
-                </div>
-              </div>
-            ))
+            displayMessages.map((message) => renderMessageRow(message))
           )}
         </div>
 

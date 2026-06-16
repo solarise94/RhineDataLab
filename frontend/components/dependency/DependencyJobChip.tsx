@@ -42,6 +42,8 @@ export function DependencyJobChip({ projectId, className }: DependencyJobChipPro
       }),
     [entries]
   );
+  const activeEntriesRef = useRef(activeEntries);
+  activeEntriesRef.current = activeEntries;
 
   const terminalEntries = useMemo(
     () =>
@@ -106,11 +108,14 @@ export function DependencyJobChip({ projectId, className }: DependencyJobChipPro
   }, [projectId, clearTerminalDependencyJobs]);
 
   // Compensating sync: poll backend for active jobs in case SSE terminal event was lost.
+  // activeEntries is intentionally omitted from the dependency array: reading it via
+  // a ref breaks the self-sustaining re-render loop where every store mutation
+  // changed activeEntries' identity, tore down the effect, and immediately re-polled.
   useEffect(() => {
-    if (!activeEntries.length) return;
-
     const poll = async () => {
-      for (const entry of activeEntries) {
+      const entriesToPoll = activeEntriesRef.current;
+      if (!entriesToPoll.length) return;
+      for (const entry of entriesToPoll) {
         try {
           const job = await api.getRuntimeDependencyJob(projectId, entry.jobId);
           if (job.status === "succeeded" || job.status === "failed") {
@@ -141,7 +146,7 @@ export function DependencyJobChip({ projectId, className }: DependencyJobChipPro
     poll();
     const interval = window.setInterval(poll, 5_000);
     return () => window.clearInterval(interval);
-  }, [activeEntries, projectId, updateDependencyJob]);
+  }, [projectId, updateDependencyJob]);
 
   // Pick the single chip to render
   const chip = useMemo(() => {
