@@ -338,7 +338,7 @@ class DiagnosticBundleService:
         return {"version": sys.version, "executable": sys.executable}
 
     def _bwrap_info(self) -> dict[str, Any]:
-        from app.workers.command_worker import _BWRAP_SMOKE_OK, _ensure_bwrap_runtime
+        from app.workers.command_worker import _BWRAP_SMOKE_CACHE, _ensure_bwrap_runtime
 
         configured_mode = str(getattr(self.settings, "executor_sandbox_mode", "none"))
         bwrap_path = shutil.which("bwrap")
@@ -351,6 +351,9 @@ class DiagnosticBundleService:
             bwrap_path = bwrap_path or resolved
         except Exception as exc:
             smoke_error = str(exc)
+        # Cache is keyed by resolved bwrap path; report whether any prior smoke
+        # test in this process succeeded.
+        previously_smoke_ok = any(_BWRAP_SMOKE_CACHE.values())
         return {
             "configured_mode": configured_mode,
             "installed": installed,
@@ -358,7 +361,7 @@ class DiagnosticBundleService:
             "path": bwrap_path,
             # Cached result from a previous smoke test during this process lifetime.
             # Note: if bwrap is fixed at runtime, this cache is stale until restart.
-            "previously_smoke_ok": _BWRAP_SMOKE_OK,
+            "previously_smoke_ok": previously_smoke_ok,
             "error": smoke_error,
         }
 

@@ -30,6 +30,11 @@ elif [[ -f "${ROOT_DIR}/runtime/mirror-presets/mirror_env.sh" ]]; then
   MIRROR_PRESETS_DIR="${ROOT_DIR}/runtime/mirror-presets"
 fi
 
+# Shared runtime detection helpers (conda base + default Python/R runtime).
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# shellcheck source=lib_runtime_detect.sh
+source "${SCRIPT_DIR}/lib_runtime_detect.sh"
+
 _expand_mirror_preset() {
   local preset="$1"
   [[ -n "${MIRROR_PRESETS_DIR}" ]] || return 0
@@ -111,27 +116,6 @@ find_node_bin() {
     printf '%s\n' "${candidate}"
     return 0
   fi
-  return 1
-}
-
-detect_conda_base() {
-  local candidates=(
-    "${BLUEPRINT_EXECUTOR_CONDA_BASE:-}"
-    "${CONDA_PREFIX:-}"
-    "${HOME}/.local/share/blueprint-re/mamba"
-    "${HOME}/miniconda3"
-    "${HOME}/miniforge3"
-    "${HOME}/anaconda3"
-    "/opt/conda"
-  )
-  local candidate
-  for candidate in "${candidates[@]}"; do
-    [[ -n "${candidate}" ]] || continue
-    if [[ -x "${candidate}/bin/conda" || -x "${candidate}/bin/micromamba" ]]; then
-      printf '%s\n' "${candidate}"
-      return 0
-    fi
-  done
   return 1
 }
 
@@ -257,47 +241,6 @@ provision_bundled_r_extras() {
     return 1
   fi
   printf '%s %s\n' "${spec_hash}" "${micromamba_version}" > "${extras_marker}"
-}
-
-detect_default_python_runtime() {
-  local conda_base="$1"
-  [[ -n "${conda_base}" ]] || return 1
-  local candidates=(omicverse analysis base)
-  local name
-  for name in "${candidates[@]}"; do
-    if [[ "${name}" == "base" && -x "${conda_base}/bin/python" ]]; then
-      printf '%s\n' "base"
-      return 0
-    fi
-    if [[ -x "${conda_base}/envs/${name}/bin/python" ]]; then
-      printf '%s\n' "${name}"
-      return 0
-    fi
-  done
-  return 1
-}
-
-detect_default_r_runtime() {
-  local conda_base="$1"
-  if [[ -n "${conda_base}" ]]; then
-    local candidates=(bioconductor r-bio base)
-    local name
-    for name in "${candidates[@]}"; do
-      if [[ "${name}" == "base" && -x "${conda_base}/bin/Rscript" ]]; then
-        printf '%s\n' "base"
-        return 0
-      fi
-      if [[ -x "${conda_base}/envs/${name}/bin/Rscript" ]]; then
-        printf '%s\n' "${name}"
-        return 0
-      fi
-    done
-  fi
-  if command -v Rscript >/dev/null 2>&1; then
-    printf '%s\n' "__system__"
-    return 0
-  fi
-  return 1
 }
 
 prompt_default() {

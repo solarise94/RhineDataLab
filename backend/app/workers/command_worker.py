@@ -2,14 +2,16 @@ from __future__ import annotations
 
 import json
 from datetime import datetime, timezone
+from functools import lru_cache
 from pathlib import Path
 import os
+import re
 import shlex
 import shutil
 import subprocess
 import sys
 
-from app.core.config import default_conda_base, default_conda_base_candidates
+from app.core.config import default_conda_base, default_conda_base_candidates, find_conda_solver
 from app.models.runs import TaskPacket
 from app.workers.base import PermissionRequest, WorkerAdapter, WorkerLaunchSpec
 
@@ -244,14 +246,41 @@ class CommandTemplateWorkerAdapter(WorkerAdapter):
         if not conda_env:
             return command, {}
         conda_base, env_path = CommandTemplateWorkerAdapter._resolve_conda_runtime(conda_env, settings)
-        conda_bin = conda_base / "bin" / "conda"
-        if conda_bin.exists() and env_path.exists():
-            return [str(conda_bin), "run", "-p", str(env_path), "--no-capture-output", *command], {}
+        if not env_path.exists():
+            return command, {
+                "PATH": f"{env_path / 'bin'}{os.pathsep}{os.environ.get('PATH', '')}",
+                "CONDA_PREFIX": str(env_path),
+                "CONDA_DEFAULT_ENV": conda_env,
+            }
+        solver = find_conda_solver(conda_base)
+        if solver is not None:
+            solver_name = solver.name
+            if solver_name == "micromamba":
+                if CommandTemplateWorkerAdapter._micromamba_run_supports_empty_attach(solver):
+                    return [str(solver), "run", "-p", str(env_path), "-a", "", *command], {}
+            elif solver_name in ("conda", "mamba"):
+                return [str(solver), "run", "-p", str(env_path), "--no-capture-output", *command], {}
         return command, {
             "PATH": f"{env_path / 'bin'}{os.pathsep}{os.environ.get('PATH', '')}",
             "CONDA_PREFIX": str(env_path),
             "CONDA_DEFAULT_ENV": conda_env,
         }
+
+    @staticmethod
+    @lru_cache(maxsize=None)
+    def _micromamba_run_supports_empty_attach(micromamba_bin: Path) -> bool:
+        """Check whether the bundled micromamba supports ``run -a ""`` passthrough."""
+        try:
+            result = subprocess.run(
+                [str(micromamba_bin), "run", "--help"],
+                capture_output=True,
+                text=True,
+                timeout=10,
+                check=False,
+            )
+        except Exception:
+            return False
+        return bool(re.search(r"(^|\s)(-a|--attach)\b", result.stdout))
 
     @staticmethod
     def _resolve_conda_runtime(conda_env: str, settings: object) -> tuple[Path, Path]:
@@ -456,6 +485,30 @@ class CommandTemplateWorkerAdapter(WorkerAdapter):
             mambarc_path = Path(mambarc)
             if mambarc_path.exists():
                 environment["MAMBARC"] = str(mambarc_path)
+        # Bind any resolved runtime env path that lives outside the already-bound
+        # conda base / mamba root (e.g. an env under ~/miniforge3 when the solver
+        # source is the bundled mamba root, or a user-supplied absolute path).
+        if not host_root_readonly:
+            runtime_paths: set[Path] = set()
+            conda_env = packet.executor_context.runtime_bindings.conda_env if packet.executor_context else None
+            r_env = packet.executor_context.runtime_bindings.r_env if packet.executor_context else None
+            if conda_env:
+                _, env_path = CommandTemplateWorkerAdapter._resolve_conda_runtime(conda_env, settings)
+                if env_path.exists():
+                    runtime_paths.add(env_path.resolve())
+            if r_env:
+                rscript_path = CommandTemplateWorkerAdapter._resolve_rscript_runtime(r_env, settings)
+                if rscript_path is not None and rscript_path.exists():
+                    runtime_paths.add(rscript_path.parent.parent.resolve())
+            for runtime_path in sorted(runtime_paths):
+                if str(runtime_path) in {"/bin", "/usr", "/lib", "/lib64", "/etc", "/opt"}:
+                    continue
+                if any(str(runtime_path).startswith(str(bound)) and str(runtime_path) != str(bound) for bound in readonly_binds):
+                    continue
+                if any(str(runtime_path) == str(bound) for bound in readonly_binds):
+                    continue
+                bind_args.extend(["--ro-bind", str(runtime_path), str(runtime_path)])
+                readonly_binds.append(runtime_path)
         env_keys = {
             "BLUEPRINT_PROJECT_ROOT",
             "BLUEPRINT_RUN_DIR",

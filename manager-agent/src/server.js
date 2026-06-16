@@ -286,6 +286,10 @@ const TOOL_STATUS_LABELS = {
     active: "正在提交环境依赖任务",
     done: "已提交环境依赖任务",
   },
+  create_runtime: {
+    active: "正在创建运行环境",
+    done: "已创建运行环境",
+  },
   resolve_runtime_dependencies: {
     active: "正在解析环境依赖",
     done: "已解析环境依赖",
@@ -1005,7 +1009,7 @@ function summarizeToolPayload(toolName, payload) {
       items_count: payload.items_count,
     };
   }
-  if (toolName === "install_runtime_dependencies" || toolName === "get_runtime_dependency_install_status") {
+  if (toolName === "install_runtime_dependencies" || toolName === "get_runtime_dependency_install_status" || toolName === "create_runtime") {
     return {
       task_id: payload.task_id,
       job_id: payload.job_id,
@@ -1265,13 +1269,15 @@ function buildToolReport(toolName, details) {
       details,
     };
   }
-  if (toolName === "install_runtime_dependencies" && details.background && details.job_id) {
+  if ((toolName === "install_runtime_dependencies" || toolName === "create_runtime") && details.background && details.job_id) {
     const runtime = details.runtime || "selected runtime";
     const packageCount = Array.isArray(details.packages) ? details.packages.length : 0;
     return {
       summary:
         details.message ||
-        `已启动后台依赖安装任务：${runtime}${packageCount ? `，共 ${packageCount} 个包` : ""}。`,
+        (toolName === "create_runtime"
+          ? `已启动后台运行环境创建任务：${runtime}。`
+          : `已启动后台依赖安装任务：${runtime}${packageCount ? `，共 ${packageCount} 个包` : ""}。`),
       details,
     };
   }
@@ -1377,7 +1383,7 @@ function buildAsyncBoundaryTurnMessage(turnControl) {
   if (!boundary?.active) {
     return "";
   }
-  if (boundary.toolName === "install_runtime_dependencies") {
+  if (boundary.toolName === "install_runtime_dependencies" || boundary.toolName === "create_runtime") {
     return boundary.jobId
       ? `已提交环境依赖任务（${boundary.jobId}），等待后台完成后继续。`
       : "已提交环境依赖任务，等待后台完成后继续。";
@@ -1419,7 +1425,7 @@ function isRunAsyncBoundaryPayload(toolName, payload) {
 }
 
 function isDependencyJobAsyncBoundaryPayload(toolName, payload) {
-  if (toolName !== "install_runtime_dependencies") {
+  if (toolName !== "install_runtime_dependencies" && toolName !== "create_runtime") {
     return false;
   }
   if (!payload || typeof payload !== "object") {
@@ -2059,6 +2065,50 @@ function createTools(request, runtimeConfig = resolveManagerConfig(request)) {
           );
         } catch (error) {
           return toolErrorResult(error, { error_type: "install_runtime_dependencies_failed", tool_name: "install_runtime_dependencies" });
+        }
+      },
+    },
+    {
+      name: "create_runtime",
+      label: "Create runtime environment",
+      description: "Create a new isolated Python or R environment in the bundled mamba root. This is useful when the user wants a clean runtime (e.g. a specific Python version) that is not available in the existing runtime list. After a successful start, report the job_id and stop this turn; do not poll status in the same turn. The new environment automatically appears in the runtime picker once creation succeeds.",
+      parameters: Type.Object({
+        ecosystem: Type.String({ description: "python or r." }),
+        env_name: Type.String({ description: "New environment name, e.g. py311-clean. Must start with a letter and contain only letters, digits, underscores, or hyphens." }),
+        packages: Type.Optional(Type.Array(Type.String({ description: "Optional bare package names to install during creation." }))),
+        python_version: Type.Optional(Type.String({ description: "Python version, e.g. 3.11. Only used when ecosystem is python." })),
+        r_version: Type.Optional(Type.String({ description: "R version, e.g. 4.4. Only used when ecosystem is r." })),
+        auto_select: Type.Optional(Type.Boolean({ description: "Set true to make the new environment the project's preferred runtime for this ecosystem." })),
+        timeout_seconds: Type.Optional(Type.Number()),
+        source: Type.Optional(
+          Type.Object({
+            session_id: Type.Optional(Type.String()),
+          }),
+        ),
+      }),
+      execute: async (toolCallId, params, signal) => {
+        try {
+          const payload = await callLoggedTool(
+            "create_runtime",
+            toolCallId,
+            projectId,
+            baseUrl,
+            token,
+            `/internal/manager-tools/projects/${projectId}/runtime-dependencies/create-runtime`,
+            {
+              method: "POST",
+              body: params,
+            },
+            signal,
+            sessionId,
+          );
+          return toolTextResult(
+            "create_runtime",
+            payload,
+            isDependencyJobAsyncBoundaryPayload("create_runtime", payload),
+          );
+        } catch (error) {
+          return toolErrorResult(error, { error_type: "create_runtime_failed", tool_name: "create_runtime" });
         }
       },
     },
@@ -2909,6 +2959,7 @@ function createTools(request, runtimeConfig = resolveManagerConfig(request)) {
     "delete_card",
     "configure_card_execution",
     "install_runtime_dependencies",
+    "create_runtime",
     "promote_workboard_item_to_todo",
     "claim_workboard_item",
     "complete_workboard_item",

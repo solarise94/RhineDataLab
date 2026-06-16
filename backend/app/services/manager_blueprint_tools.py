@@ -8,7 +8,7 @@ from pathlib import Path
 import re
 import shutil
 import subprocess
-from typing import Any
+from typing import Any, Literal
 
 from fastapi import HTTPException
 from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_validator
@@ -34,6 +34,7 @@ from app.services.result_asset_service import ResultAssetService
 from app.services.runtime_dependency_job_service import RuntimeDependencyJobService
 from app.core.config import find_conda_solver
 from app.services.runtime_dependency_resolver_service import (
+    BARE_NAME_GRAMMAR,
     PACKAGE_STATUS_FALLBACK_REQUIRED,
     RESOLVER_STATUS_FALLBACK_AVAILABLE_BUT_AMBIGUOUS,
     RESOLVER_STATUS_FALLBACK_AVAILABLE_POLICY_DISALLOWS,
@@ -168,6 +169,19 @@ class InstallRuntimeDependenciesPayload(BaseModel):
     channels: list[str] = Field(default_factory=list)
     # Set by the resolver; never sent by Manager.
     installer_plan: list[dict[str, Any]] | None = None
+
+
+class CreateRuntimePayload(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    ecosystem: Literal["python", "r"]
+    env_name: str
+    packages: list[str] = Field(default_factory=list)
+    python_version: str | None = None
+    r_version: str | None = None
+    auto_select: bool = False
+    timeout_seconds: int = 1200
+    source: dict[str, Any] = Field(default_factory=dict)
 
 
 class FindCardsPayload(BaseModel):
@@ -1329,6 +1343,200 @@ class ManagerBlueprintTools:
             "created_at": job.created_at,
         }
 
+    def create_runtime(self, project_id: str, payload: dict, session_id: str | None = None) -> dict:
+        if self.runtime_dependency_job_service is None:
+            raise ManagerPlanningError("runtime dependency job service is unavailable.")
+        try:
+            request = CreateRuntimePayload.model_validate(payload)
+        except ValidationError as exc:
+            raise ManagerPlanningError(f"Invalid create_runtime payload: {exc}") from exc
+
+        env_name = request.env_name.strip()
+        if env_name in {"base", "__system__"} or env_name.startswith("blueprint-re-"):
+            return {
+                "ok": False,
+                "background": False,
+                "async_boundary": False,
+                "do_not_poll": False,
+                "wait_for_wake": False,
+                "error_code": "reserved_runtime_name",
+                "message": f"Runtime name '{env_name}' is reserved.",
+            }
+        if len(env_name) > 64 or not re.fullmatch(r"^[A-Za-z][A-Za-z0-9_-]*$", env_name):
+            return {
+                "ok": False,
+                "background": False,
+                "async_boundary": False,
+                "do_not_poll": False,
+                "wait_for_wake": False,
+                "error_code": "invalid_runtime_name",
+                "message": "Invalid runtime environment name. Use up to 64 letters, digits, underscores, or hyphens.",
+            }
+
+        version = (request.python_version if request.ecosystem == "python" else request.r_version)
+        if version is not None:
+            version = version.strip()
+            if not re.fullmatch(r"^\d+\.\d+(\.\d+)?$", version):
+                return {
+                    "ok": False,
+                    "background": False,
+                    "async_boundary": False,
+                    "do_not_poll": False,
+                    "wait_for_wake": False,
+                    "error_code": "invalid_runtime_version",
+                    "message": "Version must be a bare semver string like '3.12' or '4.4'.",
+                }
+
+        safe_packages: list[str] = []
+        for pkg in request.packages:
+            stripped = str(pkg or "").strip()
+            if not stripped or _contains_shell_danger_simple(stripped) or "/" in stripped:
+                return {
+                    "ok": False,
+                    "background": False,
+                    "async_boundary": False,
+                    "do_not_poll": False,
+                    "wait_for_wake": False,
+                    "error_code": "unsupported_source_spec",
+                    "message": f"Rejected unsafe package name: {stripped!r}.",
+                }
+            if not BARE_NAME_GRAMMAR.fullmatch(stripped):
+                return {
+                    "ok": False,
+                    "background": False,
+                    "async_boundary": False,
+                    "do_not_poll": False,
+                    "wait_for_wake": False,
+                    "error_code": "unsupported_source_spec",
+                    "message": f"Package name must be a bare registry name: {stripped!r}.",
+                }
+            safe_packages.append(stripped)
+
+        settings = self.project_service.settings
+        mamba_root = getattr(settings, "executor_mamba_root_prefix", None)
+        if not mamba_root:
+            mamba_root = str(Path.home() / ".local/share/blueprint-re/mamba")
+        target_base = Path(mamba_root)
+        env_path = target_base / "envs" / env_name
+
+        if env_path.exists():
+            return {
+                "ok": False,
+                "background": False,
+                "async_boundary": False,
+                "do_not_poll": False,
+                "wait_for_wake": False,
+                "error_code": "runtime_already_exists",
+                "message": f"Runtime environment '{env_name}' already exists.",
+            }
+
+        solver = find_conda_solver(target_base)
+        if solver is None:
+            micromamba = shutil.which("micromamba")
+            if micromamba:
+                solver = Path(micromamba)
+        if solver is None:
+            return {
+                "ok": False,
+                "background": False,
+                "async_boundary": False,
+                "do_not_poll": False,
+                "wait_for_wake": False,
+                "error_code": "solver_not_found",
+                "message": "No conda solver found in the bundled mamba root.",
+            }
+
+        command = [str(solver), "create", "-y", "-n", env_name, "-p", str(env_path)]
+        command.extend(["-c", "conda-forge", "-c", "bioconda"])
+        if request.ecosystem == "python":
+            command.append(f"python={version}" if version else "python")
+        else:
+            command.append(f"r-base={version}" if version else "r-base")
+        command.extend(safe_packages)
+
+        timeout = max(30, min(int(request.timeout_seconds or 1200), 1800))
+
+        source = dict(request.source or {})
+        if session_id:
+            source["session_id"] = session_id
+
+        job_payload: dict[str, Any] = {
+            "ecosystem": request.ecosystem,
+            "env_name": env_name,
+            "env_path": str(env_path),
+            "command": command,
+            "timeout_seconds": timeout,
+            "source": source,
+            "auto_select": request.auto_select,
+            "mamba_root": str(target_base),
+        }
+
+        job = self.runtime_dependency_job_service.submit(
+            project_id,
+            job_payload,
+            self._create_runtime_sync,
+            task_type="runtime_dependency_create",
+        )
+
+        return {
+            "ok": True,
+            "background": True,
+            "async_boundary": True,
+            "do_not_poll": True,
+            "wait_for_wake": True,
+            "task_id": job.task_id,
+            "job_id": job.job_id,
+            "status": job.status,
+            "ecosystem": request.ecosystem,
+            "runtime": env_name,
+            "message": f"Started background runtime creation for {env_name}.",
+            "created_at": job.created_at,
+        }
+
+    def _create_runtime_sync(self, project_id: str, payload: dict, phase_callback=None) -> dict:
+        env_name = payload["env_name"]
+        env_path = Path(payload["env_path"])
+        command = list(payload["command"])
+        timeout = int(payload.get("timeout_seconds", 1200))
+        ecosystem = payload["ecosystem"]
+        auto_select = bool(payload.get("auto_select", False))
+        mamba_root = Path(payload.get("mamba_root", env_path.parent.parent))
+        mambarc = mamba_root / ".mambarc"
+        started_at = utc_now()
+
+        extra_env: dict[str, str] | None = None
+        if mambarc.exists():
+            extra_env = {
+                "MAMBA_ROOT_PREFIX": str(mamba_root),
+                "MAMBARC": str(mambarc),
+            }
+
+        result = self._run_dependency_command(
+            project_id,
+            command,
+            ecosystem=ecosystem,
+            runtime=env_name,
+            resolved_runtime=str(env_path),
+            packages=[],
+            manager_name="conda",
+            timeout=timeout,
+            started_at=started_at,
+            phase_callback=phase_callback,
+            extra_env=extra_env,
+        )
+
+        if result.get("ok") and auto_select:
+            try:
+                pref_key = "python_runtime" if ecosystem == "python" else "r_runtime"
+                self.project_service.update_project_runtime_preferences(
+                    project_id,
+                    {pref_key: env_name},
+                )
+            except Exception as exc:
+                logger.exception("Failed to auto-select runtime after creation")
+                result["auto_select_error"] = str(exc)
+        return result
+
     def resolve_runtime_dependencies(self, project_id: str, payload: dict, session_id: str | None = None) -> dict:
         """Plan-only counterpart of ``install_runtime_dependencies``.
 
@@ -1748,6 +1956,7 @@ class ManagerBlueprintTools:
         timeout: int,
         started_at: str,
         phase_callback=None,
+        extra_env: dict[str, str] | None = None,
     ) -> dict:
         """Run a single subprocess command for dependency installation.
 
@@ -1758,6 +1967,10 @@ class ManagerBlueprintTools:
         tracking requires switching to ``Popen`` (future P1 work).
         """
         run_env = self._dependency_subprocess_env(ecosystem, manager_name, resolved_runtime) if ecosystem == "R" and manager_name != "conda" else None
+        if extra_env is not None:
+            merged = dict(run_env) if run_env is not None else dict(os.environ)
+            merged.update(extra_env)
+            run_env = merged
         if phase_callback:
             phase_callback("launching_subprocess", command_preview=command)
             phase_callback("running_subprocess", command_preview=command)

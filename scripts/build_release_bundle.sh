@@ -317,6 +317,9 @@ fi
 if [[ -f "${REPO_ROOT}/deploy/runtime/blueprint-re-r-extras.yml" ]]; then
   cp "${REPO_ROOT}/deploy/runtime/blueprint-re-r-extras.yml" "${BUNDLE_ROOT}/runtime/blueprint-re-r-extras.yml"
 fi
+if [[ -f "${REPO_ROOT}/deploy/runtime/blueprint-re-python.yml" ]]; then
+  cp "${REPO_ROOT}/deploy/runtime/blueprint-re-python.yml" "${BUNDLE_ROOT}/runtime/blueprint-re-python.yml"
+fi
 
 # Write a proper conda environment file for online installs.
 cat > "${BUNDLE_ROOT}/runtime/environment.yml" <<'EOF'

@@ -926,6 +926,8 @@ export function ProjectWorkspace({ projectId, view }: { projectId: string; view:
                 readOnly={autoLocked}
                 globalPythonRuntime={effectiveGlobalPythonRuntime}
                 globalRRuntime={effectiveGlobalRRuntime}
+                projectId={projectId}
+                sessionId={currentChatSessionId}
               />
             </div>
           ) : null}
@@ -1060,6 +1062,8 @@ export function ProjectWorkspace({ projectId, view }: { projectId: string; view:
                     readOnly={autoLocked}
                     globalPythonRuntime={effectiveGlobalPythonRuntime}
                     globalRRuntime={effectiveGlobalRRuntime}
+                    projectId={projectId}
+                    sessionId={currentChatSessionId}
                   />
                 </>
               ) : null}

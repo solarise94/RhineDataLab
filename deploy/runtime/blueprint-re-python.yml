@@ -1,0 +1,17 @@
+name: omicverse
+channels:
+  - https://mirrors.tuna.tsinghua.edu.cn/anaconda/cloud/conda-forge
+  - https://mirrors.tuna.tsinghua.edu.cn/anaconda/cloud/bioconda
+dependencies:
+  - python =3.12
+  - omicverse
+  - scanpy
+  - anndata
+  - numpy
+  - pandas
+  - scipy
+  - scikit-learn
+  - matplotlib
+  - seaborn
+  - jupyter
+  - ipykernel

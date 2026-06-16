@@ -638,6 +638,42 @@ export const api = {
       },
     );
   },
+  createRuntime(
+    projectId: string,
+    payload: {
+      ecosystem: "python" | "r";
+      env_name: string;
+      packages?: string[];
+      python_version?: string | null;
+      r_version?: string | null;
+      auto_select?: boolean;
+      timeout_seconds?: number;
+      source?: { session_id?: string } | null;
+    },
+    sessionId?: string | null,
+  ) {
+    return request<{
+      ok: boolean;
+      background: boolean;
+      async_boundary: boolean;
+      do_not_poll: boolean;
+      wait_for_wake: boolean;
+      task_id: string;
+      job_id: string;
+      status: string;
+      ecosystem: string;
+      runtime: string;
+      message: string;
+      created_at: string;
+    }>(
+      `/internal/manager-tools/projects/${projectId}/runtime-dependencies/create-runtime`,
+      {
+        method: "POST",
+        body: JSON.stringify({ ...payload, source: payload.source ?? {} }),
+        headers: sessionId ? { "x-blueprint-session-id": sessionId } : undefined,
+      },
+    );
+  },
   markRuntimeDependencyJobResolved(projectId: string, jobId: string, sessionId: string, resolutionMessage?: string) {
     return request<{
       job_id: string;

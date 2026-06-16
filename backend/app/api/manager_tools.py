@@ -23,6 +23,7 @@ _MUTATING_TOOL_NAMES = {
     "delete_card",
     "set_tool_policy",
     "install_runtime_dependencies",
+    "create_runtime",
     "promote_workboard_item_to_todo",
     "claim_workboard_item",
     "complete_workboard_item",
@@ -610,6 +611,31 @@ def install_runtime_dependencies(
     _guard_mutation(project_id, "install_runtime_dependencies", x_blueprint_session_id, manager_auto_service)
     try:
         response = manager_service.blueprint_tools.install_runtime_dependencies(project_id, payload, x_blueprint_session_id)
+        if response.get("job_id"):
+            _mark_auto_running(
+                project_id,
+                x_blueprint_session_id,
+                manager_auto_service,
+                active_job_id=str(response.get("job_id")),
+            )
+        return response
+    except ManagerPlanningError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+
+
+@router.post("/runtime-dependencies/create-runtime")
+def create_runtime(
+    project_id: str,
+    payload: dict,
+    authorization: str | None = Header(default=None),
+    x_blueprint_session_id: str | None = Header(default=None),
+    manager_service: ManagerService = Depends(get_manager_service),
+    manager_auto_service: ManagerAutoService = Depends(get_manager_auto_service),
+) -> dict:
+    _verify_internal_token(authorization)
+    _guard_mutation(project_id, "create_runtime", x_blueprint_session_id, manager_auto_service)
+    try:
+        response = manager_service.blueprint_tools.create_runtime(project_id, payload, x_blueprint_session_id)
         if response.get("job_id"):
             _mark_auto_running(
                 project_id,

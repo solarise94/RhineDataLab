@@ -82,9 +82,10 @@ Options:
   --help             Show this message.
 
 Environment:
-  BLUEPRINT_RELEASE_BASE       Override the default release directory.
-  BLUEPRINT_INSTALL_R_RUNTIME  1 (default) build slim R runtime; 0 skip.
-  BLUEPRINT_INSTALL_R_EXTRAS   0 (default); 1 append enrichment packages.
+  BLUEPRINT_RELEASE_BASE           Override the default release directory.
+  BLUEPRINT_INSTALL_R_RUNTIME      1 (default) build slim R runtime; 0 skip.
+  BLUEPRINT_INSTALL_R_EXTRAS       0 (default); 1 append enrichment packages.
+  BLUEPRINT_INSTALL_PYTHON_RUNTIME 0 (default); 1 build omicverse Python runtime.
 EOF
         exit 0
         ;;
@@ -589,6 +590,7 @@ BUNDLED_MAMBARC="${BUNDLED_MAMBA_ROOT}/.mambarc"
 BLUEPRINT_DEFAULT_R_RUNTIME="${BLUEPRINT_DEFAULT_R_RUNTIME:-}"
 BLUEPRINT_INSTALL_R_RUNTIME="${BLUEPRINT_INSTALL_R_RUNTIME:-1}"
 BLUEPRINT_INSTALL_R_EXTRAS="${BLUEPRINT_INSTALL_R_EXTRAS:-0}"
+BLUEPRINT_INSTALL_PYTHON_RUNTIME="${BLUEPRINT_INSTALL_PYTHON_RUNTIME:-0}"
 # Shared across runtime/extras functions; set once after micromamba is copied.
 micromamba_version=""
 
@@ -625,6 +627,60 @@ provision_bundled_mamba() {
 
   micromamba_version="$("${BUNDLED_MAMBA_BIN}" --version 2>/dev/null || echo unknown)"
   return 0
+}
+
+provision_bundled_python_runtime() {
+  if [[ "${BLUEPRINT_INSTALL_PYTHON_RUNTIME}" != "1" ]]; then
+    info "Skipping bundled Python runtime (BLUEPRINT_INSTALL_PYTHON_RUNTIME!=1)."
+    return 0
+  fi
+  if [[ ! -x "${BUNDLED_MAMBA_BIN}" ]]; then
+    warn "No bundled micromamba; skipping Python runtime."
+    return 1
+  fi
+  if [[ ! -f "${PAYLOAD_DIR}/runtime/blueprint-re-python.yml" ]]; then
+    warn "No blueprint-re-python.yml in payload; skipping Python runtime."
+    return 1
+  fi
+
+  local py_env="omicverse"
+  local py_env_dir="${BUNDLED_MAMBA_ROOT}/envs/${py_env}"
+  local py_env_spec="${PAYLOAD_DIR}/runtime/blueprint-re-python.yml"
+  local marker_file="${py_env_dir}/.blueprint-re-python.build-info"
+  local spec_hash
+  spec_hash="$(sha256sum "${py_env_spec}" | awk '{print $1}')"
+  local expected_marker="${spec_hash} ${micromamba_version}"
+
+  if [[ -x "${py_env_dir}/bin/python" ]]; then
+    if [[ -f "${marker_file}" ]]; then
+      if [[ "$(cat "${marker_file}" 2>/dev/null)" == "${expected_marker}" ]]; then
+        info "Bundled Python runtime ${py_env} is up to date."
+        BLUEPRINT_DEFAULT_PYTHON_RUNTIME="${py_env}"
+        return 0
+      fi
+      info "Bundled Python runtime spec or micromamba version changed; rebuilding ${py_env}."
+    else
+      info "Bundled Python runtime exists but build marker is missing; rebuilding ${py_env}."
+    fi
+    "${BUNDLED_MAMBA_BIN}" env remove -n "${py_env}" -y 2>/dev/null || true
+  fi
+
+  info "Creating bundled Python runtime (${py_env})... this may take 10-20 min."
+  local create_cmd=("${BUNDLED_MAMBA_BIN}" create -y -n "${py_env}" -f "${py_env_spec}")
+  if [[ -d "${PAYLOAD_DIR}/runtime/pkgs" && -n "$(ls -A "${PAYLOAD_DIR}/runtime/pkgs" 2>/dev/null)" ]]; then
+    info "Using embedded Python package cache for offline install."
+    mkdir -p "${BUNDLED_MAMBA_ROOT}/pkgs"
+    cp -a "${PAYLOAD_DIR}/runtime/pkgs/." "${BUNDLED_MAMBA_ROOT}/pkgs/"
+    create_cmd+=(--offline)
+  fi
+  if ! "${create_cmd[@]}"; then
+    warn "Bundled Python runtime provisioning failed; cleaning partial env."
+    "${BUNDLED_MAMBA_BIN}" env remove -n "${py_env}" -y 2>/dev/null || true
+    return 1
+  fi
+  printf '%s %s\n' "${spec_hash}" "${micromamba_version}" > "${marker_file}"
+  BLUEPRINT_DEFAULT_PYTHON_RUNTIME="${py_env}"
+  info "Bundled Python runtime ${py_env} ready."
 }
 
 provision_bundled_r_runtime() {
@@ -713,6 +769,7 @@ provision_bundled_r_extras() {
 }
 
 if provision_bundled_mamba; then
+  provision_bundled_python_runtime
   provision_bundled_r_runtime
   provision_bundled_r_extras
   export BLUEPRINT_EXECUTOR_MAMBA_ROOT_PREFIX="${BUNDLED_MAMBA_ROOT}"

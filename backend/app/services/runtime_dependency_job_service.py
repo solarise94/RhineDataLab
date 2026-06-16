@@ -28,6 +28,7 @@ class RuntimeDependencyJob:
     project_id: str
     task_id: str
     payload: dict[str, Any]
+    task_type: str = "runtime_dependency_install"
     status: JobStatus = "queued"
     phase: str = "queued"
     result: dict[str, Any] | None = None
@@ -76,14 +77,21 @@ class RuntimeDependencyJobService:
         self._watchdog_thread = threading.Thread(target=self._watchdog_loop, daemon=True, name="runtime-deps-watchdog")
         self._watchdog_thread.start()
 
-    def submit(self, project_id: str, payload: dict[str, Any], handler) -> RuntimeDependencyJob:
+    def submit(
+        self,
+        project_id: str,
+        payload: dict[str, Any],
+        handler,
+        *,
+        task_type: str = "runtime_dependency_install",
+    ) -> RuntimeDependencyJob:
         # P2: atomic submission — task and job are created as one logical unit.
         # If any step fails, roll back the partial record.
         task = None
         try:
             task = self.background_task_service.create_task(
                 project_id,
-                task_type="runtime_dependency_install",
+                task_type=task_type,
                 affected={"job_ids": [], "card_ids": [payload.get("source", {}).get("card_id")] if isinstance(payload.get("source"), dict) and payload.get("source", {}).get("card_id") else []},
                 adapter={"kind": "dependency_installer"},
             )
@@ -92,6 +100,7 @@ class RuntimeDependencyJobService:
                 project_id=project_id,
                 task_id=task.task_id,
                 payload=payload,
+                task_type=task_type,
             )
             self.background_task_service.update_task(
                 project_id,
@@ -375,6 +384,7 @@ class RuntimeDependencyJobService:
         source = source_payload if isinstance(source_payload, dict) else {}
         payload: dict[str, Any] = {
             "task_id": job.task_id,
+            "task_type": job.task_type,
             "job_status": job.status,
             "phase": job.phase,
             "runtime": job.payload.get("runtime"),
@@ -466,6 +476,7 @@ class RuntimeDependencyJobService:
                     job_id=job_id,
                     project_id=str(item.get("project_id") or project_id),
                     payload=payload,
+                    task_type=str(item.get("task_type") or "runtime_dependency_install"),
                     status=str(item.get("status") or "failed"),
                     task_id=str(item.get("task_id") or f"bgtask_{job_id}"),
                     phase=str(item.get("phase") or item.get("status") or "failed"),
@@ -561,6 +572,7 @@ class RuntimeDependencyJobService:
                     "job_id": job.job_id,
                     "project_id": job.project_id,
                     "task_id": job.task_id,
+                    "task_type": job.task_type,
                     "payload": job.payload,
                     "status": job.status,
                     "phase": job.phase,

@@ -271,78 +271,8 @@ CODEX_BIN="$(find_optional_bin codex)"
 # Conda base detection
 # ---------------------------------------------------------------------------
 
-detect_conda_base() {
-  local candidates=(
-    "${BLUEPRINT_EXECUTOR_CONDA_BASE:-}"
-    "${BLUEPRINT_EXECUTOR_MAMBA_ROOT_PREFIX:-}"
-    "${HOME}/.local/share/blueprint-re/mamba"
-    "${CONDA_PREFIX:-}"
-    "${HOME}/miniconda3"
-    "${HOME}/miniforge3"
-    "${HOME}/anaconda3"
-    "/opt/conda"
-  )
-  local candidate
-  for candidate in "${candidates[@]}"; do
-    [[ -n "${candidate}" ]] || continue
-    if [[ -x "${candidate}/bin/conda" || -x "${candidate}/bin/micromamba" ]]; then
-      printf '%s\n' "${candidate}"
-      return 0
-    fi
-  done
-  return 1
-}
-
-detect_default_python_runtime() {
-  local conda_base="$1"
-  local env_name="${BLUEPRINT_DEFAULT_PYTHON_RUNTIME:-}"
-  if [[ -n "${env_name}" ]]; then
-    printf '%s\n' "${env_name}"
-    return 0
-  fi
-  [[ -n "${conda_base}" ]] || return 1
-  local candidates=(omicverse analysis base)
-  local name
-  for name in "${candidates[@]}"; do
-    if [[ "${name}" == "base" && -x "${conda_base}/bin/python" ]]; then
-      printf '%s\n' "base"
-      return 0
-    fi
-    if [[ -x "${conda_base}/envs/${name}/bin/python" ]]; then
-      printf '%s\n' "${name}"
-      return 0
-    fi
-  done
-  return 1
-}
-
-detect_default_r_runtime() {
-  local conda_base="$1"
-  local env_name="${BLUEPRINT_DEFAULT_R_RUNTIME:-}"
-  if [[ -n "${env_name}" ]]; then
-    printf '%s\n' "${env_name}"
-    return 0
-  fi
-  if [[ -n "${conda_base}" ]]; then
-    local candidates=(blueprint-re-r bioconductor r-bio base)
-    local name
-    for name in "${candidates[@]}"; do
-      if [[ "${name}" == "base" && -x "${conda_base}/bin/Rscript" ]]; then
-        printf '%s\n' "base"
-        return 0
-      fi
-      if [[ -x "${conda_base}/envs/${name}/bin/Rscript" ]]; then
-        printf '%s\n' "${name}"
-        return 0
-      fi
-    done
-  fi
-  if command -v Rscript >/dev/null 2>&1; then
-    printf '%s\n' "__system__"
-    return 0
-  fi
-  return 1
-}
+# shellcheck source=lib_runtime_detect.sh
+source "${SCRIPT_DIR}/lib_runtime_detect.sh"
 
 CONDA_BASE=""
 DEFAULT_PYTHON_RUNTIME=""
