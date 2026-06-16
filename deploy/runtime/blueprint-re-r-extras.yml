@@ -1,0 +1,11 @@
+# Optional heavy annotation/enrichment packages. Append on top of
+# blueprint-re-r via: BLUEPRINT_INSTALL_R_EXTRAS=1 bash install.sh
+# Adds ~220MB (org.Hs/Mm.eg.db annotation DBs + clusterProfiler chain).
+name: blueprint-re-r
+channels:
+  - https://mirrors.tuna.tsinghua.edu.cn/anaconda/cloud/conda-forge
+  - https://mirrors.tuna.tsinghua.edu.cn/anaconda/cloud/bioconda
+dependencies:
+  - bioconductor-clusterprofiler
+  - bioconductor-org.hs.eg.db
+  - bioconductor-org.mm.eg.db

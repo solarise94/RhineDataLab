@@ -7,6 +7,8 @@ INSTALL_INTERACTIVE=0
 REQUIRED_PYTHON_VERSION="3.13.0"
 REQUIRED_NODE_VERSION="22.19.0"
 BLUEPRINT_MIRROR_PRESET="${BLUEPRINT_MIRROR_PRESET:-tsinghua}"
+BLUEPRINT_INSTALL_R_RUNTIME="${BLUEPRINT_INSTALL_R_RUNTIME:-1}"
+BLUEPRINT_INSTALL_R_EXTRAS="${BLUEPRINT_INSTALL_R_EXTRAS:-0}"
 
 # Remember which mirror variables were explicitly provided by the user so we
 # do not overwrite them when the preset changes later (e.g. via .env or
@@ -157,10 +159,19 @@ provision_bundled_mamba() {
 }
 
 provision_bundled_r_runtime() {
+  if [[ "${BLUEPRINT_INSTALL_R_RUNTIME}" != "1" ]]; then
+    return 0
+  fi
   local mamba_base="$1"
   local r_env="blueprint-re-r"
   local env_spec="${ROOT_DIR}/runtime/blueprint-re-r.yml"
+  if [[ ! -f "${env_spec}" ]]; then
+    env_spec="${ROOT_DIR}/deploy/runtime/blueprint-re-r.yml"
+  fi
   local local_pkgs="${ROOT_DIR}/runtime/pkgs"
+  if [[ ! -d "${local_pkgs}" ]]; then
+    local_pkgs="${ROOT_DIR}/deploy/runtime/pkgs"
+  fi
   local micromamba_bin="${mamba_base}/bin/micromamba"
   [[ -x "${micromamba_bin}" && -f "${env_spec}" ]] || return 1
 
@@ -204,6 +215,48 @@ provision_bundled_r_runtime() {
   fi
   printf '%s %s\n' "${spec_hash}" "${micromamba_version}" > "${marker_file}"
   printf '%s\n' "${r_env}"
+}
+
+provision_bundled_r_extras() {
+  if [[ "${BLUEPRINT_INSTALL_R_EXTRAS}" != "1" ]]; then
+    return 0
+  fi
+  local mamba_base="$1"
+  local r_env="blueprint-re-r"
+  local extras_spec="${ROOT_DIR}/runtime/blueprint-re-r-extras.yml"
+  if [[ ! -f "${extras_spec}" ]]; then
+    extras_spec="${ROOT_DIR}/deploy/runtime/blueprint-re-r-extras.yml"
+  fi
+  if [[ ! -f "${extras_spec}" ]]; then
+    echo "No blueprint-re-r-extras.yml found; skipping R extras." >&2
+    return 1
+  fi
+  if [[ ! -x "${mamba_base}/envs/${r_env}/bin/Rscript" ]]; then
+    echo "ERROR: BLUEPRINT_INSTALL_R_EXTRAS=1 but base R runtime is not built. Set BLUEPRINT_INSTALL_R_RUNTIME=1 as well." >&2
+    return 1
+  fi
+  local micromamba_bin="${mamba_base}/bin/micromamba"
+  [[ -x "${micromamba_bin}" ]] || return 1
+
+  local env_dir="${mamba_base}/envs/${r_env}"
+  local extras_marker="${env_dir}/.blueprint-re-r-extras.build-info"
+  local spec_hash extras_expected
+  spec_hash="$(sha256sum "${extras_spec}" | awk '{print $1}')"
+  local micromamba_version
+  micromamba_version="$("${micromamba_bin}" --version 2>/dev/null || echo unknown)"
+  extras_expected="${spec_hash} ${micromamba_version}"
+  if [[ -f "${extras_marker}" && "$(cat "${extras_marker}" 2>/dev/null)" == "${extras_expected}" ]]; then
+    return 0
+  fi
+
+  echo "Appending R extras (clusterProfiler + annotation DBs, ~220MB)..." >&2
+  export MAMBA_ROOT_PREFIX="${mamba_base}"
+  export MAMBARC="${mamba_base}/.mambarc"
+  if ! "${micromamba_bin}" install -y -n "${r_env}" -f "${extras_spec}"; then
+    echo "R extras provisioning failed; base R runtime remains usable." >&2
+    return 1
+  fi
+  printf '%s %s\n' "${spec_hash}" "${micromamba_version}" > "${extras_marker}"
 }
 
 detect_default_python_runtime() {
@@ -349,9 +402,19 @@ fi
 if [[ -z "${BLUEPRINT_DEFAULT_R_RUNTIME:-}" ]]; then
   BLUEPRINT_DEFAULT_R_RUNTIME="$(
     detect_default_r_runtime "${BLUEPRINT_EXECUTOR_CONDA_BASE:-}" 2>/dev/null \
-    || provision_bundled_r_runtime "${BLUEPRINT_EXECUTOR_CONDA_BASE:-}" 2>/dev/null \
     || true
   )"
+fi
+# If no existing R runtime was detected, provision the bundled one.
+if [[ -z "${BLUEPRINT_DEFAULT_R_RUNTIME:-}" && -n "${BLUEPRINT_EXECUTOR_CONDA_BASE:-}" ]]; then
+  BLUEPRINT_DEFAULT_R_RUNTIME="$(
+    provision_bundled_r_runtime "${BLUEPRINT_EXECUTOR_CONDA_BASE}" 2>/dev/null \
+    || true
+  )"
+fi
+# Append enrichment packages to the bundled env when requested.
+if [[ "${BLUEPRINT_DEFAULT_R_RUNTIME:-}" == "blueprint-re-r" && -n "${BLUEPRINT_EXECUTOR_CONDA_BASE:-}" ]]; then
+  provision_bundled_r_extras "${BLUEPRINT_EXECUTOR_CONDA_BASE}" 2>/dev/null || true
 fi
 
 printf "Blueprint RE installer\n"

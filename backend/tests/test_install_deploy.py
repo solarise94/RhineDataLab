@@ -129,7 +129,12 @@ class TestInstallDeployBehavior(unittest.TestCase):
         )
 
     def _run_deploy_with_stubs(self, env_lines: list[str], extra_env: dict[str, str] | None = None) -> tuple[subprocess.CompletedProcess[str], dict[str, str]]:
-        """Run deploy in a temp HOME with stubbed external commands and return (result, parsed backend.env)."""
+        """Run deploy in a temp HOME with stubbed external commands and return (result, parsed backend.env).
+
+        These tests verify backend.env generation, not live HTTP health. The stub
+        environment has no real backend/nginx, so health probes would always fail
+        and force exit 1; skip them via BLUEPRINT_DEPLOY_SKIP_HEALTH_CHECK.
+        """
         self._write_test_env(env_lines)
 
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -138,7 +143,7 @@ class TestInstallDeployBehavior(unittest.TestCase):
             temp_bin = Path(tmpdir) / "bin"
             temp_bin.mkdir()
 
-            for cmd in ("systemctl", "bwrap", "git"):
+            for cmd in ("systemctl", "bwrap", "git", "nginx"):
                 (temp_bin / cmd).write_text("#!/bin/bash\nexit 0\n", encoding="utf-8")
                 (temp_bin / cmd).chmod(0o755)
 
@@ -178,6 +183,8 @@ class TestInstallDeployBehavior(unittest.TestCase):
             env = os.environ.copy()
             env["HOME"] = str(temp_home)
             env["PATH"] = f"{temp_bin}:{env.get('PATH', '')}"
+            # Skip HTTP health probes in stub env (see docstring); extra_env can override.
+            env["BLUEPRINT_DEPLOY_SKIP_HEALTH_CHECK"] = "1"
             if extra_env:
                 env.update(extra_env)
 

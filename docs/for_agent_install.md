@@ -40,7 +40,21 @@
 
 ## Preferred Path
 
-产品/用户安装优先使用 release 固定入口 `install.sh`。它会自动下载并校验对应版本的自解压安装器，然后执行：
+产品/用户安装统一使用版本化自解压安装包作为入口。同一个 `.sh` 包既能首次安装，也能升级已有安装：
+
+```bash
+sh rhinedatalab-<version>-linux-x86_64.sh
+```
+
+已有安装时，上述命令会自动进入升级流程，不需要额外参数。如果希望 CI/运维脚本明确“必须是升级、不允许误装成首次安装”，可显式传入 `--upgrade`：
+
+```bash
+sh rhinedatalab-<version>-linux-x86_64.sh --upgrade
+```
+
+`--upgrade` 在没有已有安装时会直接报错，避免脚本误以为完成了升级。
+
+也可以通过 release 固定入口 `install.sh` 自动下载并校验对应版本的安装器：
 
 ```bash
 curl -fsSL \
@@ -48,7 +62,7 @@ curl -fsSL \
   bash
 ```
 
-如果需要指定版本：
+指定版本：
 
 ```bash
 VERSION=0.4.2
@@ -57,11 +71,7 @@ curl -fsSL \
   bash
 ```
 
-也可以先手动下载版本化自解压安装器再执行：
-
-```bash
-bash rhinedatalab-<version>-linux-x86_64.sh
-```
+`install.sh` 下载完成后会执行同版本的自解压安装器，行为与直接运行 `.sh` 包一致。
 
 release installer 的职责：
 
@@ -222,12 +232,24 @@ the installer can provision a fully local runtime:
 
 - `BLUEPRINT_MIRROR_PRESET` controls the mirror set. Defaults to `tsinghua` for mainland
   China; use `ustc` or `default` (official sources) as needed.
+- `BLUEPRINT_INSTALL_R_RUNTIME` controls whether the bundled R env is built.
+  `1` (default) installs the slim runtime covering DESeq2/edgeR/limma + tidyverse
+  + plotting. `0` skips R entirely; micromamba is still installed.
+- `BLUEPRINT_INSTALL_R_EXTRAS` controls whether enrichment packages are appended.
+  `0` (default) keeps the slim runtime. `1` adds clusterProfiler + org.Hs/Mm.eg.db
+  on top of the existing `blueprint-re-r` env using `micromamba install -n`,
+  not a rebuild.
 - `provision_bundled_mamba()` copies the bundled `micromamba` to
   `~/.local/share/blueprint-re/mamba`, writes a `.mambarc` with the selected preset,
   and exports `MAMBA_ROOT_PREFIX` / `MAMBARC`.
-- `provision_bundled_r_runtime()` creates the `blueprint-re-r` conda environment from
-  `deploy/runtime/blueprint-re-r.yml`. With `--with-r-cache`, packages are pre-downloaded
-  into `runtime/pkgs/` for fully offline installs.
+- `provision_bundled_r_runtime()` creates/updates the slim `blueprint-re-r` conda
+  environment from `deploy/runtime/blueprint-re-r.yml`.
+- `provision_bundled_r_extras()` appends `deploy/runtime/blueprint-re-r-extras.yml`
+  to the same env when `BLUEPRINT_INSTALL_R_EXTRAS=1`.
+- With `--with-r-cache`, the slim runtime packages are pre-downloaded into
+  `runtime/pkgs/` for fully offline installs. Extras are packaged but not
+  pre-downloaded because Bioconductor annotation DB tarballs cannot be reliably
+  fetched in `--download-only` mode.
 
 Backend settings:
 
@@ -401,16 +423,18 @@ curl -fsS http://127.0.0.1:18001/api/executor-profiles
 - 已修复的本机兼容性配置。
 - 仍需用户手动处理的 API key、CLI 登录或系统依赖。
 
-## Manual Fallback
+## Source / Developer Fallback
 
-如果交互安装脚本不适合当前场景：
+`scripts/deploy_user_systemd.sh` 保留为源码/开发部署入口，不再作为普通用户升级路径推荐。只有在从源码树直接部署、或需要手动调整 `.env` 后再部署时才使用：
 
-1. 准备 `.env`
+1. 准备仓库根 `.env`
 2. 运行：
 
 ```bash
 bash scripts/deploy_user_systemd.sh
 ```
+
+普通用户应优先使用 release 自解压安装包 `rhinedatalab-<version>-linux-x86_64.sh` 完成首次安装和升级。
 
 ## Important Constraints
 

@@ -126,6 +126,7 @@ parse_test() {
   local OFFLINE_MODE=0
   local ROLLBACK_VERSION=""
   local SKIP_VERIFY=0
+  local FORCE_UPGRADE=0
 
   local i=0
   while [[ ${i} -lt ${#args[@]} ]]; do
@@ -140,6 +141,9 @@ parse_test() {
       --skip-verify)
         SKIP_VERIFY=1
         ;;
+      --upgrade)
+        FORCE_UPGRADE=1
+        ;;
     esac
     i=$((i + 1))
   done
@@ -147,12 +151,91 @@ parse_test() {
   echo "OFFLINE_MODE=${OFFLINE_MODE}"
   echo "ROLLBACK_VERSION=${ROLLBACK_VERSION}"
   echo "SKIP_VERIFY=${SKIP_VERIFY}"
+  echo "FORCE_UPGRADE=${FORCE_UPGRADE}"
 }
 
-result="$(parse_test --offline --rollback 0.4.0 --skip-verify)"
+result="$(parse_test --offline --rollback 0.4.0 --skip-verify --upgrade)"
 assert "offline parsed" "echo '${result}' | grep -q 'OFFLINE_MODE=1'"
 assert "rollback parsed" "echo '${result}' | grep -q 'ROLLBACK_VERSION=0.4.0'"
 assert "skip-verify parsed" "echo '${result}' | grep -q 'SKIP_VERIFY=1'"
+assert "upgrade parsed" "echo '${result}' | grep -q 'FORCE_UPGRADE=1'"
+
+echo ""
+
+# ---------------------------------------------------------------------------
+# Test 3b: install.sh --help mentions --upgrade
+# ---------------------------------------------------------------------------
+echo "Test 3b: install.sh --help mentions --upgrade"
+
+HELP_OUTPUT="$(bash "${REPO_ROOT}/scripts/install.sh" --help 2>&1 || true)"
+assert "help usage includes --upgrade" "printf '%s\n' \"${HELP_OUTPUT}\" | grep -q 'Usage: bash install.sh \\[--offline\\] \\[--upgrade\\] \\[--rollback VERSION\\]'"
+assert "help options include --upgrade" "printf '%s\n' \"${HELP_OUTPUT}\" | grep -q 'Require an existing installation and run upgrade flow'"
+
+echo ""
+
+# ---------------------------------------------------------------------------
+# Test 3c: FORCE_UPGRADE fails fast when no existing installation
+# ---------------------------------------------------------------------------
+echo "Test 3c: FORCE_UPGRADE fails fast when no existing installation"
+
+# The guard must run in Phase 1 preflight, BEFORE payload extraction or
+# environment creation, so --upgrade cannot silently perform expensive work
+# on a fresh host.
+INSTALL_SH="${REPO_ROOT}/scripts/install.sh"
+FORCE_UPGRADE_LINE="$(grep -n 'FORCE_UPGRADE.*-eq 1.*! -L.*CURRENT_LINK' "${INSTALL_SH}" | head -1 | cut -d: -f1)"
+PHASE2_LINE="$(grep -n 'Phase 2: Payload extraction' "${INSTALL_SH}" | head -1 | cut -d: -f1)"
+assert "FORCE_UPGRADE guard exists in install.sh" "[[ -n ${FORCE_UPGRADE_LINE} ]]"
+assert "FORCE_UPGRADE guard comes before Phase 2" "[[ ${FORCE_UPGRADE_LINE} -lt ${PHASE2_LINE} ]]"
+
+# Simulate the early preflight gate.
+check_force_upgrade_preflight() {
+  local force_upgrade="$1"
+  local current_link="$2"
+  if [[ "${force_upgrade}" -eq 1 && ! -L "${current_link}" ]]; then
+    echo "ERROR: --upgrade was requested, but no existing Blueprint RE installation was found at ${current_link}" >&2
+    return 1
+  fi
+  return 0
+}
+
+TMP_FORCE_UPGRADE_DIR="$(mktemp -d)"
+ln -sfn "${TMP_FORCE_UPGRADE_DIR}/current-target" "${TMP_FORCE_UPGRADE_DIR}/current"
+assert "force upgrade accepted when current symlink exists" "check_force_upgrade_preflight 1 '${TMP_FORCE_UPGRADE_DIR}/current'"
+rm -rf "${TMP_FORCE_UPGRADE_DIR}"
+assert_fail "force upgrade rejected when no current symlink" "check_force_upgrade_preflight 1 '/nonexistent/current'"
+assert "non-force install accepted without current symlink" "check_force_upgrade_preflight 0 '/nonexistent/current'"
+
+echo ""
+
+# ---------------------------------------------------------------------------
+# Test 3d: fresh install with legacy port conflict is blocked
+# ---------------------------------------------------------------------------
+echo "Test 3d: fresh install with legacy port conflict is blocked"
+
+# Simulate the legacy/source-deployment preflight gate from install.sh Phase 1.
+# When there is no current symlink and Blueprint ports are occupied, treat it as
+# a likely legacy deployment and refuse to proceed.
+check_legacy_port_conflict() {
+  local current_link="$1"
+  shift
+  local port_conflicts=("$@")
+  if [[ ! -L "${current_link}" && "${#port_conflicts[@]}" -gt 0 ]]; then
+    echo "ERROR: Detected Blueprint ports already in use (${port_conflicts[*]}), but no existing release installation was found at ${current_link}." >&2
+    return 1
+  fi
+  return 0
+}
+
+TMP_LEGACY_CHECK="$(mktemp -d)"
+MISSING_CURRENT="${TMP_LEGACY_CHECK}/missing-current"
+EXISTING_CURRENT="${TMP_LEGACY_CHECK}/existing-current"
+ln -sfn "${TMP_LEGACY_CHECK}/current-target" "${EXISTING_CURRENT}"
+
+assert_fail "fresh install blocked when ports occupied" "check_legacy_port_conflict '${MISSING_CURRENT}' 13001 18001"
+assert "upgrade path allowed when current exists" "check_legacy_port_conflict '${EXISTING_CURRENT}' 13001 18001"
+assert "fresh install allowed when ports free" "check_legacy_port_conflict '${MISSING_CURRENT}'"
+
+rm -rf "${TMP_LEGACY_CHECK}"
 
 echo ""
 
@@ -921,6 +1004,7 @@ bash "${REPO_ROOT}/scripts/render_release_downloader.sh" \
 HELP_OUTPUT="$(bash "${RENDERED2}" --help 2>&1 || true)"
 assert "help mentions Forwarded flags" "echo '${HELP_OUTPUT}' | grep -q 'Forwarded flags'"
 assert "help mentions --keep-installer" "echo '${HELP_OUTPUT}' | grep -q 'keep-installer'"
+assert "help mentions --upgrade" "echo '${HELP_OUTPUT}' | grep -q 'upgrade'"
 assert "help mentions --rollback" "echo '${HELP_OUTPUT}' | grep -q 'rollback'"
 assert "public downloader rejects --skip-verify" "(bash '${RENDERED2}' --skip-verify 2>&1 || true) | grep -q 'not accepted by the public downloader'"
 

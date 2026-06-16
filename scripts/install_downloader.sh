@@ -124,6 +124,7 @@ Downloader Options:
 
 Forwarded to Installer:
   --offline               Fail if the embedded package cache is missing
+  --upgrade               Require an existing installation and run upgrade flow
   --rollback VERSION      Switch to a previous release version
 
 Other:

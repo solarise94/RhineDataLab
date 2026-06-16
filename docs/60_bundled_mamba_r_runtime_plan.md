@@ -86,7 +86,13 @@ micromamba 单二进制、无依赖、专为离线/CI 设计，**独立发布在
 
 在内置 micromamba 下创建 env `blueprint-re-r`，装 R + 核心生信包。原因：conda env 自带正确 ABI 的 R + gfortran + BLAS，避免用户机器缺系统库编译失败；resolver 已知如何探测 conda env 的 Rscript（`command_worker.py:_resolve_rscript_runtime`）；缺包时用同一个 micromamba 补装，路径一致。
 
-基础包清单（覆盖 80% RNA-seq 流程，体积可控）：
+R 运行时拆成**精简版（默认）**和**完整版（opt-in）**两个层级，通过环境变量控制，共用同一个 conda env `blueprint-re-r`：
+
+- `BLUEPRINT_INSTALL_R_RUNTIME=1`（默认）：安装精简版，覆盖 DESeq2/edgeR/limma + tidyverse + 画图。
+- `BLUEPRINT_INSTALL_R_RUNTIME=1` + `BLUEPRINT_INSTALL_R_EXTRAS=1`：在精简版基础上追加 clusterProfiler + org.Hs/Mm.eg.db 等富集分析注释库。
+- `BLUEPRINT_INSTALL_R_RUNTIME=0`：完全跳过 R 运行时（连精简版都不建），micromamba 仍照常安装。
+
+精简版包清单（覆盖 80% RNA-seq 流程，体积可控）：
 
 ```yaml
 # deploy/runtime/blueprint-re-r.yml
@@ -101,6 +107,17 @@ dependencies:
   - bioconductor-deseq2
   - bioconductor-edger
   - bioconductor-limma
+```
+
+可选 enrichment extras（追加到同一环境，不重建）：
+
+```yaml
+# deploy/runtime/blueprint-re-r-extras.yml
+name: blueprint-re-r
+channels:
+  - https://mirrors.tuna.tsinghua.edu.cn/anaconda/cloud/conda-forge
+  - https://mirrors.tuna.tsinghua.edu.cn/anaconda/cloud/bioconda
+dependencies:
   - bioconductor-clusterprofiler
   - bioconductor-org.hs.eg.db
   - bioconductor-org.mm.eg.db
@@ -278,7 +295,7 @@ if [[ -x "${candidate}/bin/conda" || -x "${candidate}/bin/micromamba" ]]; then
 
 #### W1-B：内置 R 环境（2-3 天）
 
-**W1-B1. 新增 `deploy/runtime/blueprint-re-r.yml`**（见决策 2 清单）
+**W1-B1. 新增 `deploy/runtime/blueprint-re-r.yml` 与 `deploy/runtime/blueprint-re-r-extras.yml`**（见决策 2 清单）
 
 **W1-B2. `build_release_bundle.sh`：`--with-r-cache`**
 
@@ -296,59 +313,50 @@ if [[ "${BUILD_R_CACHE}" -eq 1 ]]; then
 fi
 ```
 
-**W1-B3. `install_blueprint_re.sh`：`provision_bundled_r_runtime()`（完整版）**
+`blueprint-re-r-extras.yml` 也会被打包进 release（文件本身很小），但是 `--with-r-cache` **暂不预下载 extras**：Bioconductor 注释库 tarball 在 `--download-only` 模式下拉不全，预下载也是假离线。需要完整离线时，建议直接用精简版或事后联网追加 extras。
 
-新增，`detect_default_r_runtime` 失败时调用（line 215 附近）。完整逻辑含命令、离线分支、幂等判定、失败回滚、marker 输入：
+**W1-B3. `install.sh` / `install_blueprint_re.sh`：三函数拆分 + `BLUEPRINT_INSTALL_R_RUNTIME` / `BLUEPRINT_INSTALL_R_EXTRAS` 开关**
+
+Phase 5b 拆成三个函数：
+
+1. `provision_bundled_mamba()`：永远执行，只装 micromamba + `.mambarc` + 展开镜像变量。
+2. `provision_bundled_r_runtime()`：受 `BLUEPRINT_INSTALL_R_RUNTIME` 控制，建/更新精简版 `blueprint-re-r`。
+3. `provision_bundled_r_extras()`：受 `BLUEPRINT_INSTALL_R_EXTRAS` 控制，用 `micromamba install -n blueprint-re-r` 追加 enrichment 包到同一环境。
+
+关键实现细节：
+
+- `micromamba_version` 提到 Phase 5b 顶部作为普通变量，供 runtime/extras 两个函数共享。
+- 精简版 marker：`.blueprint-re-r.build-info`；extras marker：`.blueprint-re-r-extras.build-info`，两者独立。
+- extras 失败只 `return 1`，不 `env remove`，保证精简版仍可用。
+- `EXTRAS=1` 但 `RUNTIME=0` 时直接 `die`，提示需同时开启 `RUNTIME=1`。
 
 ```bash
+BLUEPRINT_INSTALL_R_RUNTIME="${BLUEPRINT_INSTALL_R_RUNTIME:-1}"
+BLUEPRINT_INSTALL_R_EXTRAS="${BLUEPRINT_INSTALL_R_EXTRAS:-0}"
+
 provision_bundled_r_runtime() {
-  local mamba_base="$1"          # = MAMBA_ROOT_PREFIX，如 ~/.local/share/blueprint-re/mamba
-  local r_env="blueprint-re-r"
-  local env_spec="${ROOT_DIR}/runtime/blueprint-re-r.yml"
-  local local_pkgs="${ROOT_DIR}/runtime/pkgs"
-  local micromamba_bin="${mamba_base}/bin/micromamba"
-  [[ -x "${micromamba_bin}" && -f "${env_spec}" ]] || return 1
-
-  local env_dir="${mamba_base}/envs/${r_env}"
-  # 幂等：env 已存在直接跳过
-  if [[ -x "${env_dir}/bin/Rscript" ]]; then
-    printf '%s\n' "${r_env}"
-    return 0
-  fi
-
-  echo "Provisioning bundled R runtime (${r_env})... this may take 5-20 min."
-  export MAMBA_ROOT_PREFIX="${mamba_base}"
-  export MAMBARC="${mamba_base}/.mambarc"
-
-  # 在线 vs 离线：有本地缓存且非空走 --offline
-  local create_cmd=("${micromamba_bin}" create -y -n "${r_env}" -f "${env_spec}")
-  if [[ -d "${local_pkgs}" ]] && [[ -n "$(ls -A "${local_pkgs}" 2>/dev/null)" ]]; then
-    create_cmd+=(--channel "${local_pkgs}" --offline)
-  fi
-
-  # 失败回滚：避免半建 env 污染下次 rerun
-  if ! "${create_cmd[@]}"; then
-    echo "R runtime provisioning failed; cleaning partial env." >&2
-    "${micromamba_bin}" env remove -n "${r_env}" -y 2>/dev/null || true
-    return 1
-  fi
-  printf '%s\n' "${r_env}"
+  [[ "${BLUEPRINT_INSTALL_R_RUNTIME}" == "1" ]] || return 0
+  # ...精简版 create/rebuild，marker 写入 .blueprint-re-r.build-info
 }
-```
 
-修改 R 探测链路（line 215 附近）：
+provision_bundled_r_extras() {
+  [[ "${BLUEPRINT_INSTALL_R_EXTRAS}" == "1" ]] || return 0
+  # ...用 micromamba install -n blueprint-re-r 追加 extras
+  # marker 写入 .blueprint-re-r-extras.build-info
+}
 
-```bash
-if [[ -z "${BLUEPRINT_DEFAULT_R_RUNTIME:-}" ]]; then
-  BLUEPRINT_DEFAULT_R_RUNTIME="$(
-    detect_default_r_runtime "${BLUEPRINT_EXECUTOR_CONDA_BASE:-}" 2>/dev/null \
-    || provision_bundled_r_runtime "${BLUEPRINT_EXECUTOR_CONDA_BASE:-}" 2>/dev/null \
-    || true
-  )"
+if provision_bundled_mamba; then
+  provision_bundled_r_runtime
+  provision_bundled_r_extras
+  export BLUEPRINT_EXECUTOR_MAMBA_ROOT_PREFIX="${BUNDLED_MAMBA_ROOT}"
+  export BLUEPRINT_EXECUTOR_MAMBARC="${BUNDLED_MAMBARC}"
+  export BLUEPRINT_CRAN_MIRROR="${BLUEPRINT_CRAN_MIRROR:-}"
+  export BLUEPRINT_BIOCONDUCTOR_MIRROR="${BLUEPRINT_BIOCONDUCTOR_MIRROR:-}"
+  export BLUEPRINT_PYPI_MIRROR="${BLUEPRINT_PYPI_MIRROR:-}"
 fi
 ```
 
-**deploy marker**（见 W1-B4）：输入 hash = `blueprint-re-r.yml` 的 SHA-256 **+ micromamba 版本**（micromamba 升级可能影响 env metadata 格式）。**只在成功后写 marker**——失败不写，下次 rerun 会重建（配合上面的失败回滚）。
+**deploy marker**（见 W1-B4）：输入 hash = 对应 `.yml` 的 SHA-256 **+ micromamba 版本**（micromamba 升级可能影响 env metadata 格式）。**只在成功后写 marker**——失败不写，下次 rerun 会重建（配合上面的失败回滚）。
 
 **W1-B4. bwrap 沙箱 + env 透传（关键子任务）**
 
@@ -364,7 +372,13 @@ AGENTS.md 明确 `BLUEPRINT_EXECUTOR_SANDBOX_MODE=bwrap` 是必选，且 bwrap �
 - `deploy_user_systemd.sh` 的 backend.env 写入白名单（`known_set`，line ~329）加 `BLUEPRINT_EXECUTOR_MAMBA_ROOT_PREFIX`、`BLUEPRINT_EXECUTOR_MAMBARC`、`BLUEPRINT_CRAN_MIRROR`、`BLUEPRINT_BIOCONDUCTOR_MIRROR`、`BLUEPRINT_PYPI_MIRROR`。（用 `BLUEPRINT_EXECUTOR_` 前缀，和 `BLUEPRINT_EXECUTOR_CONDA_BASE` / `BLUEPRINT_DEFAULT_R_RUNTIME` 同域一致；`*_MIRROR` 是 registry 安装用，跨 executor 共享，不加 EXECUTOR_ 前缀。）
 - backend `Settings`（config.py）加 `executor_mamba_root_prefix`/`executor_mambarc` 字段，install 脚本从进程级 `MAMBA_ROOT_PREFIX`/`MAMBARC`/preset 展开写入这两个配置键。
 
-**W1-B 验收**：fresh machine 装完，`BLUEPRINT_DEFAULT_R_RUNTIME=blueprint-re-r`，bwrap 子进程内进程级 `MAMBA_ROOT_PREFIX` 可见（由 backend 从 `BLUEPRINT_EXECUTOR_MAMBA_ROOT_PREFIX` 配置键注入），`micromamba run -n blueprint-re-r Rscript -e 'library(DESeq2)'` 成功，DESeq2 卡直接通过。
+**W1-B 验收**：
+
+- `BLUEPRINT_INSTALL_R_RUNTIME=0` → Phase 5b 秒过，不建 R env。
+- `BLUEPRINT_INSTALL_R_RUNTIME=1`（默认）→ 精简版建成，`library(DESeq2)` 成功；`library(clusterProfiler)` 预期报错（未装）。
+- `BLUEPRINT_INSTALL_R_RUNTIME=1 BLUEPRINT_INSTALL_R_EXTRAS=1` → 完整版，`library(clusterProfiler)` + `library(org.Mm.eg.db)` 都成功；env 目录里同时存在 `.blueprint-re-r.build-info` 和 `.blueprint-re-r-extras.build-info`。
+- 重复跑或只改 extras yml → 对应 marker 命中/失效，实现幂等和增量更新。
+- fresh machine 默认路径装完，`BLUEPRINT_DEFAULT_R_RUNTIME=blueprint-re-r`，bwrap 子进程内进程级 `MAMBA_ROOT_PREFIX` 可见（由 backend 从 `BLUEPRINT_EXECUTOR_MAMBA_ROOT_PREFIX` 配置键注入），DESeq2 卡直接通过。
 
 #### W1-C：Python 分析运行时（可选，1 天）
 
@@ -372,7 +386,7 @@ AGENTS.md 明确 `BLUEPRINT_EXECUTOR_SANDBOX_MODE=bwrap` 是必选，且 bwrap �
 
 #### W1-D：文档与诊断（0.5 天）
 
-- `docs/for_agent_install.md` 补充 "Bundled mamba + R runtime" 章节，说明标准包/full 包、`BLUEPRINT_MIRROR_PRESET`、`MAMBA_ROOT_PREFIX` 透传、如何扩展 `blueprint-re-r.yml`。
+- `docs/for_agent_install.md` 补充 "Bundled mamba + R runtime" 章节，说明标准包/full 包、`BLUEPRINT_MIRROR_PRESET`、`BLUEPRINT_INSTALL_R_RUNTIME`、`BLUEPRINT_INSTALL_R_EXTRAS`、`MAMBA_ROOT_PREFIX` 透传、如何扩展 `blueprint-re-r.yml`。
 - `project_service._python_runtimes`（line 1060）/ `_r_runtimes`（line 1104）给每个 runtime dict 加 `"source": "bundled"|"system"|"conda"`，`diagnostic_bundle_service._system_info` 透传，远程排障一眼看出用户是否在用内置运行时。
 
 ---

@@ -774,7 +774,7 @@ fi
 
 # Report current port occupants before shutdown so conflicts are visible
 # instead of being hidden behind a blind restart.
-_report_port_occupants "Pre-deploy port occupants:"
+_report_port_occupants "Pre-deploy port occupants:" || true
 
 # Stop all user-level services before restarting. This is more reliable than
 # only stopping nginx/frontend because old backend/manager processes may also
@@ -800,32 +800,36 @@ systemctl --user start blueprint-re-nginx.service
 # Wait for services to settle, then run health checks.
 echo "Running health checks..."
 sleep 3
-HEALTH_OK=1
+  HEALTH_OK=1
 
-# Verify each user-level service is active before trusting the HTTP probes.
-for service_name in \
-  blueprint-re-manager-agent.service \
-  blueprint-re-backend.service \
-  blueprint-re-frontend.service \
-  blueprint-re-nginx.service; do
-  if ! _is_service_active "${service_name}"; then
-    warn_deploy "Service ${service_name} is not active"
-    HEALTH_OK=0
+  # Verify each user-level service is active before trusting the HTTP probes.
+  for service_name in \
+    blueprint-re-manager-agent.service \
+    blueprint-re-backend.service \
+    blueprint-re-frontend.service \
+    blueprint-re-nginx.service; do
+    if ! _is_service_active "${service_name}"; then
+      warn_deploy "Service ${service_name} is not active"
+      HEALTH_OK=0
+    fi
+  done
+
+  if [[ "${BLUEPRINT_DEPLOY_SKIP_HEALTH_CHECK:-0}" == "1" ]]; then
+    warn_deploy "BLUEPRINT_DEPLOY_SKIP_HEALTH_CHECK=1: skipping HTTP health probes."
+  else
+    # Verify the backend response content, not just that the port speaks HTTP.
+    if ! _http_body_check http://127.0.0.1:18001/healthz '"status":"ok"'; then
+      warn_deploy "Backend health check failed (expected {\"status\":\"ok\"} at http://127.0.0.1:18001/healthz)"
+      HEALTH_OK=0
+    fi
+
+    # Verify the nginx gateway is actually proxying the Next.js frontend.
+    if ! _http_header_check http://127.0.0.1:13001 "location: /projects" && \
+       ! _http_header_check http://127.0.0.1:13001 "X-Powered-By: Next.js"; then
+      warn_deploy "nginx gateway check failed (expected Next.js redirect at http://127.0.0.1:13001)"
+      HEALTH_OK=0
+    fi
   fi
-done
-
-# Verify the backend response content, not just that the port speaks HTTP.
-if ! _http_body_check http://127.0.0.1:18001/healthz '"status":"ok"'; then
-  warn_deploy "Backend health check failed (expected {\"status\":\"ok\"} at http://127.0.0.1:18001/healthz)"
-  HEALTH_OK=0
-fi
-
-# Verify the nginx gateway is actually proxying the Next.js frontend.
-if ! _http_header_check http://127.0.0.1:13001 "location: /projects" && \
-   ! _http_header_check http://127.0.0.1:13001 "X-Powered-By: Next.js"; then
-  warn_deploy "nginx gateway check failed (expected Next.js redirect at http://127.0.0.1:13001)"
-  HEALTH_OK=0
-fi
 
 echo ""
 echo "Blueprint RE deployed."
@@ -848,12 +852,14 @@ if [[ "${#DEPLOY_WARNINGS[@]}" -gt 0 ]]; then
   done
 fi
 if [[ "${HEALTH_OK}" -eq 0 ]]; then
-  echo ""
-  echo "WARNING: One or more health checks failed. Check service status with:"
-  echo "  systemctl --user status blueprint-re-backend.service"
-  echo "  systemctl --user status blueprint-re-manager-agent.service"
-  echo "  systemctl --user status blueprint-re-frontend.service"
-  echo "  systemctl --user status blueprint-re-nginx.service"
+  {
+    echo ""
+    echo "WARNING: One or more health checks failed. Check service status with:"
+    echo "  systemctl --user status blueprint-re-backend.service"
+    echo "  systemctl --user status blueprint-re-manager-agent.service"
+    echo "  systemctl --user status blueprint-re-frontend.service"
+    echo "  systemctl --user status blueprint-re-nginx.service"
+  } >&2
   exit 1
 fi
 

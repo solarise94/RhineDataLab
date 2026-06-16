@@ -12,6 +12,7 @@ set -euo pipefail
 #
 # Forwarded flags:
 #   --offline             Fail if the embedded package cache is missing
+#   --upgrade             Require an existing installation and run upgrade flow
 #   --rollback VERSION    Switch to a previous local release version
 #
 # Downloader options:
@@ -66,6 +67,10 @@ while [[ $# -gt 0 ]]; do
       shift
       ;;
     --offline)
+      FORWARD_ARGS+=("$1")
+      shift
+      ;;
+    --upgrade)
       FORWARD_ARGS+=("$1")
       shift
       ;;

@@ -7,7 +7,7 @@ set -euo pipefail
 # An appended tar.gz payload begins after the __PAYLOAD_START__ marker.
 #
 # Usage:
-#   bash blueprint-re-<version>-linux-x86_64.sh [--offline] [--rollback <version>]
+#   bash blueprint-re-<version>-linux-x86_64.sh [--offline] [--upgrade] [--rollback <version>]
 #
 # Note: this self-extracting file contains an appended binary tar.gz payload.
 # Do not install it via `curl | bash`; download the file first, then execute it.
@@ -30,7 +30,7 @@ umask 077
 
 INSTALL_USER="${USER:-$(id -un)}"
 
-RELEASE_BASE="${HOME}/.local/share/blueprint-re"
+RELEASE_BASE="${BLUEPRINT_RELEASE_BASE:-${HOME}/.local/share/blueprint-re}"
 RELEASES_DIR="${RELEASE_BASE}/releases"
 CURRENT_LINK="${RELEASE_BASE}/current"
 ENV_DIR="${RELEASE_BASE}/env"
@@ -40,6 +40,7 @@ APP_ENV_DIR="${HOME}/.config/blueprint-re"
 OFFLINE_MODE=0
 ROLLBACK_VERSION=""
 SKIP_VERIFY=0
+FORCE_UPGRADE=0
 
 # ---------------------------------------------------------------------------
 # Argument parsing
@@ -65,18 +66,25 @@ parse_args() {
         SKIP_VERIFY=1
         shift
         ;;
+      --upgrade)
+        FORCE_UPGRADE=1
+        shift
+        ;;
       --help|-h)
         cat <<'EOF'
-Usage: bash install.sh [OPTIONS]
+Usage: bash install.sh [--offline] [--upgrade] [--rollback VERSION]
 
 Options:
   --offline          Fail if the embedded package cache is missing.
+  --upgrade          Require an existing installation and run upgrade flow.
   --rollback VERSION Switch to a previous release version.
   --skip-verify      Skip payload checksum verification (not recommended).
   --help             Show this message.
 
 Environment:
-  BLUEPRINT_RELEASE_BASE  Override the default release directory.
+  BLUEPRINT_RELEASE_BASE       Override the default release directory.
+  BLUEPRINT_INSTALL_R_RUNTIME  1 (default) build slim R runtime; 0 skip.
+  BLUEPRINT_INSTALL_R_EXTRAS   0 (default); 1 append enrichment packages.
 EOF
         exit 0
         ;;
@@ -274,9 +282,18 @@ for port in "${PORTS_TO_CHECK[@]}"; do
   fi
 done
 if [[ "${#PORT_CONFLICTS[@]}" -gt 0 ]]; then
+  if [[ ! -L "${CURRENT_LINK}" ]]; then
+    die "Detected Blueprint ports already in use (${PORT_CONFLICTS[*]}), but no existing release installation was found at ${CURRENT_LINK}. This may be a legacy/source deployment (e.g. a manual uvicorn or an old source-tree systemd service). Stop the conflicting services before running this installer. If you intended to adopt an existing source deployment, use scripts/deploy_user_systemd.sh instead."
+  fi
   warn "The following ports are already in use: ${PORT_CONFLICTS[*]}"
   warn "If these are from a previous Blueprint RE install, the deploy will reuse them."
   warn "If another service is using them, supply custom ports via BLUEPRINT_*_PORT env vars before running deploy."
+fi
+
+# Fail fast on --upgrade without an existing installation, before any expensive
+# payload extraction or environment creation.
+if [[ "${FORCE_UPGRADE}" -eq 1 && ! -L "${CURRENT_LINK}" ]]; then
+  die "--upgrade was requested, but no existing Blueprint RE installation was found at ${CURRENT_LINK}"
 fi
 
 # Linger detection
@@ -494,8 +511,15 @@ info "Phase 5: Creating runtime environment at ${ENV_DIR}"
 mkdir -p "$(dirname "${ENV_DIR}")"
 
 # Guard against a stale non-conda directory at the target prefix.
+# An empty directory is harmless residue (e.g. from an older installer's
+# `mkdir -p`) and can be removed safely; a non-empty directory without
+# conda-meta is a real conflict that needs human judgement.
 if [[ -d "${ENV_DIR}" && ! -d "${ENV_DIR}/conda-meta" ]]; then
-  die "Runtime prefix exists but is not a conda environment: ${ENV_DIR}. Remove it and retry."
+  if [[ -n "$(find "${ENV_DIR}" -mindepth 1 -maxdepth 1 -print -quit 2>/dev/null)" ]]; then
+    die "Runtime prefix exists but is not a conda environment: ${ENV_DIR}. Remove it and retry."
+  fi
+  info "Removing empty leftover prefix directory: ${ENV_DIR}"
+  rmdir "${ENV_DIR}"
 fi
 
 if [[ "${HAS_OFFLINE_CACHE}" -eq 1 ]]; then
@@ -526,14 +550,14 @@ BUNDLED_MAMBA_ROOT="${RELEASE_BASE}/mamba"
 BUNDLED_MAMBA_BIN="${BUNDLED_MAMBA_ROOT}/bin/micromamba"
 BUNDLED_MAMBARC="${BUNDLED_MAMBA_ROOT}/.mambarc"
 BLUEPRINT_DEFAULT_R_RUNTIME="${BLUEPRINT_DEFAULT_R_RUNTIME:-}"
+BLUEPRINT_INSTALL_R_RUNTIME="${BLUEPRINT_INSTALL_R_RUNTIME:-1}"
+BLUEPRINT_INSTALL_R_EXTRAS="${BLUEPRINT_INSTALL_R_EXTRAS:-0}"
+# Shared across runtime/extras functions; set once after micromamba is copied.
+micromamba_version=""
 
-provision_bundled_mamba_in_release() {
+provision_bundled_mamba() {
   if [[ ! -x "${MAMBA_EXE}" ]]; then
     warn "No bundled micromamba available; skipping bundled mamba/R runtime provisioning."
-    return 1
-  fi
-  if [[ ! -f "${PAYLOAD_DIR}/runtime/blueprint-re-r.yml" ]]; then
-    warn "No blueprint-re-r.yml in payload; skipping bundled R runtime provisioning."
     return 1
   fi
 
@@ -562,14 +586,30 @@ provision_bundled_mamba_in_release() {
     BLUEPRINT_PYPI_MIRROR="${BLUEPRINT_PYPI_MIRROR:-$(eval echo "\${${preset}_pypi_mirror:-}")}"
   fi
 
+  micromamba_version="$("${BUNDLED_MAMBA_BIN}" --version 2>/dev/null || echo unknown)"
+  return 0
+}
+
+provision_bundled_r_runtime() {
+  if [[ "${BLUEPRINT_INSTALL_R_RUNTIME}" != "1" ]]; then
+    info "Skipping bundled R runtime (BLUEPRINT_INSTALL_R_RUNTIME!=1)."
+    return 0
+  fi
+  if [[ ! -x "${BUNDLED_MAMBA_BIN}" ]]; then
+    warn "No bundled micromamba; skipping R runtime."
+    return 1
+  fi
+  if [[ ! -f "${PAYLOAD_DIR}/runtime/blueprint-re-r.yml" ]]; then
+    warn "No blueprint-re-r.yml in payload; skipping R runtime."
+    return 1
+  fi
+
   local r_env="blueprint-re-r"
   local r_env_dir="${BUNDLED_MAMBA_ROOT}/envs/${r_env}"
   local r_env_spec="${PAYLOAD_DIR}/runtime/blueprint-re-r.yml"
   local marker_file="${r_env_dir}/.blueprint-re-r.build-info"
   local spec_hash
   spec_hash="$(sha256sum "${r_env_spec}" | awk '{print $1}')"
-  local micromamba_version
-  micromamba_version="$("${BUNDLED_MAMBA_BIN}" --version 2>/dev/null || echo unknown)"
   local expected_marker="${spec_hash} ${micromamba_version}"
 
   if [[ -x "${r_env_dir}/bin/Rscript" ]]; then
@@ -604,7 +644,40 @@ provision_bundled_mamba_in_release() {
   info "Bundled R runtime ${r_env} ready."
 }
 
-if provision_bundled_mamba_in_release; then
+provision_bundled_r_extras() {
+  if [[ "${BLUEPRINT_INSTALL_R_EXTRAS}" != "1" ]]; then
+    return 0
+  fi
+  local extras_spec="${PAYLOAD_DIR}/runtime/blueprint-re-r-extras.yml"
+  if [[ ! -f "${extras_spec}" ]]; then
+    warn "No blueprint-re-r-extras.yml in payload; skipping R extras."
+    return 1
+  fi
+  if [[ ! -x "${BUNDLED_MAMBA_ROOT}/envs/blueprint-re-r/bin/Rscript" ]]; then
+    die "BLUEPRINT_INSTALL_R_EXTRAS=1 but base R runtime is not built. Set BLUEPRINT_INSTALL_R_RUNTIME=1 as well."
+  fi
+  local r_env="blueprint-re-r"
+  local r_env_dir="${BUNDLED_MAMBA_ROOT}/envs/${r_env}"
+  local extras_marker="${r_env_dir}/.blueprint-re-r-extras.build-info"
+  local spec_hash extras_expected
+  spec_hash="$(sha256sum "${extras_spec}" | awk '{print $1}')"
+  extras_expected="${spec_hash} ${micromamba_version}"
+  if [[ -f "${extras_marker}" && "$(cat "${extras_marker}" 2>/dev/null)" == "${extras_expected}" ]]; then
+    info "R extras already up to date."
+    return 0
+  fi
+  info "Appending R extras (clusterProfiler + annotation DBs, ~220MB)..."
+  if ! "${BUNDLED_MAMBA_BIN}" install -y -n "${r_env}" -f "${extras_spec}"; then
+    warn "R extras provisioning failed; base R runtime remains usable."
+    return 1
+  fi
+  printf '%s %s\n' "${spec_hash}" "${micromamba_version}" > "${extras_marker}"
+  info "R extras ready."
+}
+
+if provision_bundled_mamba; then
+  provision_bundled_r_runtime
+  provision_bundled_r_extras
   export BLUEPRINT_EXECUTOR_MAMBA_ROOT_PREFIX="${BUNDLED_MAMBA_ROOT}"
   export BLUEPRINT_EXECUTOR_MAMBARC="${BUNDLED_MAMBARC}"
   export BLUEPRINT_CRAN_MIRROR="${BLUEPRINT_CRAN_MIRROR:-}"

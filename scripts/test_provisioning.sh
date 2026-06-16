@@ -37,6 +37,13 @@ channels:
 dependencies:
   - r-base =4.4
 EOF
+cat > "${FAKE_ROOT}/runtime/blueprint-re-r-extras.yml" <<'EOF'
+name: blueprint-re-r
+channels:
+  - conda-forge
+dependencies:
+  - bioconductor-clusterprofiler
+EOF
 
 # Mock micromamba binary: records invocations and creates a fake env on create.
 cat > "${FAKE_ROOT}/runtime/bin/micromamba" <<'EOF'
@@ -65,6 +72,20 @@ if [[ "$1" == "create" ]]; then
   echo '#!/bin/sh' > "${target}/bin/Rscript"
   chmod +x "${target}/bin/Rscript"
   mkdir -p "${target}/pkgs"
+  exit 0
+fi
+if [[ "$1" == "install" ]]; then
+  # Append-mode install: just create a marker file inside the target env.
+  env_name=""
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      -n) env_name="$2"; shift 2 ;;
+      *) shift ;;
+    esac
+  done
+  target="${MAMBA_ROOT_PREFIX}/envs/${env_name}"
+  mkdir -p "${target}/bin"
+  touch "${target}/.extras-installed"
   exit 0
 fi
 if [[ "$1" == "env" && "$2" == "remove" ]]; then
@@ -140,6 +161,51 @@ rm -f "${expected}/envs/blueprint-re-r/.blueprint-re-r.build-info"
 provision_bundled_r_runtime "${expected}" > /dev/null
 [[ -f "${expected}/envs/blueprint-re-r/.blueprint-re-r.build-info" ]] || fail "R runtime missing marker was not rebuilt"
 pass "provision_bundled_r_runtime rebuilds when marker is missing"
+
+# ---------------------------------------------------------------------------
+# Test BLUEPRINT_INSTALL_R_RUNTIME=0 skips R env creation
+# ---------------------------------------------------------------------------
+rm -rf "${expected}/envs/blueprint-re-r"
+BLUEPRINT_INSTALL_R_RUNTIME=0
+name="$(provision_bundled_r_runtime "${expected}")"
+[[ -z "${name}" ]] || fail "R runtime should be skipped when BLUEPRINT_INSTALL_R_RUNTIME=0"
+[[ ! -d "${expected}/envs/blueprint-re-r" ]] || fail "R env should not exist when skipped"
+pass "BLUEPRINT_INSTALL_R_RUNTIME=0 skips R env creation"
+BLUEPRINT_INSTALL_R_RUNTIME=1
+
+# ---------------------------------------------------------------------------
+# Test provision_bundled_r_extras
+# ---------------------------------------------------------------------------
+provision_bundled_r_runtime "${expected}" > /dev/null
+BLUEPRINT_INSTALL_R_EXTRAS=1
+provision_bundled_r_extras "${expected}"
+[[ -f "${expected}/envs/blueprint-re-r/.extras-installed" ]] || fail "R extras were not installed"
+[[ -f "${expected}/envs/blueprint-re-r/.blueprint-re-r-extras.build-info" ]] || fail "R extras marker not created"
+pass "provision_bundled_r_extras appends packages to blueprint-re-r"
+
+# Idempotency: unchanged extras spec should skip reinstall.
+rm -f "${expected}/envs/blueprint-re-r/.extras-installed"
+provision_bundled_r_extras "${expected}"
+[[ ! -f "${expected}/envs/blueprint-re-r/.extras-installed" ]] || fail "R extras reinstalled despite unchanged marker"
+pass "provision_bundled_r_extras is idempotent"
+
+# Extras spec change should trigger reinstall.
+printf '%s\n' "# trigger extras rebuild" >> "${FAKE_ROOT}/runtime/blueprint-re-r-extras.yml"
+provision_bundled_r_extras "${expected}"
+[[ -f "${expected}/envs/blueprint-re-r/.extras-installed" ]] || fail "R extras were not reinstalled after spec change"
+pass "provision_bundled_r_extras reinstalls when spec changes"
+BLUEPRINT_INSTALL_R_EXTRAS=0
+
+# ---------------------------------------------------------------------------
+# Test provision_bundled_r_extras without base runtime fails
+# ---------------------------------------------------------------------------
+rm -rf "${expected}/envs/blueprint-re-r"
+BLUEPRINT_INSTALL_R_EXTRAS=1
+if provision_bundled_r_extras "${expected}" 2>/dev/null; then
+  fail "provision_bundled_r_extras should fail when base R runtime is missing"
+fi
+pass "provision_bundled_r_extras fails when base R runtime is missing"
+BLUEPRINT_INSTALL_R_EXTRAS=0
 
 # ---------------------------------------------------------------------------
 # Test provision_bundled_r_runtime failure rollback

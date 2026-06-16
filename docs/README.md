@@ -15,18 +15,26 @@
 
 ## 安装与部署
 
-用户安装优先使用 release 固定入口 `install.sh`。它会自动解析并下载对应版本的自解压安装器，校验 checksum，然后执行：
+用户安装统一使用版本化自解压安装包 `rhinedatalab-<version>-linux-x86_64.sh` 作为入口。同一个安装包既能首次安装，也能升级已有安装：
+
+```bash
+sh rhinedatalab-<version>-linux-x86_64.sh
+```
+
+已有安装时，上述命令会自动进入升级流程。CI/运维脚本若要求“必须是升级”，可显式使用：
+
+```bash
+sh rhinedatalab-<version>-linux-x86_64.sh --upgrade
+```
+
+`--upgrade` 在没有已有安装时会报错，避免误操作。
+
+也可以通过 release 固定入口 `install.sh` 自动解析、下载并校验对应版本的安装器：
 
 ```bash
 curl -fsSL \
   https://github.com/solarise94/RhineDataLab/releases/latest/download/install.sh | \
   bash
-```
-
-也可以先手动下载版本化自解压安装器再执行：
-
-```bash
-bash rhinedatalab-<version>-linux-x86_64.sh
 ```
 
 当前用户版安装模型：
