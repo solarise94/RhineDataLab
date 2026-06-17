@@ -926,7 +926,7 @@ export function ManagerChatPanel({
       window.clearTimeout(autoSessionReconnectTimerRef.current);
       autoSessionReconnectTimerRef.current = null;
     }
-    if (!sessionId || !isAutoOwnerSession || !effectiveManagerAuto?.enabled || typeof window === "undefined") {
+    if (!sessionId || typeof window === "undefined") {
       return;
     }
     let stopped = false;
@@ -949,10 +949,13 @@ export function ManagerChatPanel({
           revision?: number;
           seq?: number;
         };
-        if (payload.type === "message_upsert") {
+        if (payload.type === "message_upsert" && isAutoOwnerSession && effectiveManagerAuto?.enabled) {
           void queryClient.refetchQueries({ queryKey: queryKeys.managerAuto(projectId, sessionId), type: "active" });
         }
         if (payload.type === "stream_event" && payload.message_id && payload.event) {
+          if (!isAutoOwnerSession || !effectiveManagerAuto?.enabled) {
+            return;
+          }
           if (typeof payload.seq === "number") {
             const lastSeq = autoStreamSeqRef.current.get(payload.message_id) ?? 0;
             if (payload.seq <= lastSeq) {
