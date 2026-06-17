@@ -287,6 +287,8 @@ cp "${REPO_ROOT}/scripts/deploy_release.sh" "${BUNDLE_ROOT}/scripts/"
 cp "${REPO_ROOT}/scripts/uninstall.sh" "${BUNDLE_ROOT}/scripts/"
 # The pi executor launcher is referenced by default BLUEPRINT_PI_COMMAND_JSON.
 cp "${REPO_ROOT}/scripts/blueprint_pi_launch.sh" "${BUNDLE_ROOT}/scripts/"
+# Shared runtime detection helpers sourced by deploy_release.sh and install.sh.
+cp "${REPO_ROOT}/scripts/lib_runtime_detect.sh" "${BUNDLE_ROOT}/scripts/"
 
 # ---------------------------------------------------------------------------
 # Gather runtime dependency metadata
