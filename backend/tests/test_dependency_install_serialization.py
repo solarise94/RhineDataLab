@@ -15,6 +15,7 @@ disk_status=stale" repeating every 30s in the backend journal.
 
 from __future__ import annotations
 
+import io
 import json
 import subprocess
 import tempfile
@@ -39,16 +40,47 @@ def _make_tools(project_path: Path) -> ManagerBlueprintTools:
     project_service.project_path.return_value = project_path
     project_service.settings = SimpleNamespace()
     tools.project_service = project_service
+    tools.runtime_dependency_job_service = None
     return tools
 
 
-class _FakeCompletedProcess:
-    """Minimal stand-in for subprocess.CompletedProcess."""
+class _FakePopen:
+    """Minimal stand-in for subprocess.Popen used by the Layer F2 line loop."""
 
-    def __init__(self, returncode: int = 0, stdout: str = "", stderr: str = "") -> None:
+    def __init__(self, command, *, stdout=None, stderr=None, text=False, bufsize=1, cwd=None, env=None):
+        self._returncode = 0
+        self.pid = 12345
+
+    @property
+    def stdout(self):
+        return self._stdout
+
+    @property
+    def stderr(self):
+        return self._stderr
+
+    def poll(self):
+        return self.returncode
+
+    def wait(self, timeout=None):
+        return self.returncode
+
+    def kill(self):
+        pass
+
+
+class _FakeSuccessfulPopen(_FakePopen):
+    def __init__(self, command, *, stdout="", stderr="", returncode=0, **kwargs):
+        self._stdout = io.StringIO(stdout)
+        self._stderr = io.StringIO(stderr)
         self.returncode = returncode
-        self.stdout = stdout
-        self.stderr = stderr
+        self.pid = 12345
+
+
+def _fake_popen_factory(stdout="", stderr="", returncode=0):
+    def _factory(command, **kwargs):
+        return _FakeSuccessfulPopen(command, stdout=stdout, stderr=stderr, returncode=returncode)
+    return _factory
 
 
 class CondaInstallSerializationTest(unittest.TestCase):
@@ -84,8 +116,8 @@ class CondaInstallSerializationTest(unittest.TestCase):
         with (
             self._patched_resolve_runtime_and_solver(),
             patch(
-                "app.services.manager_blueprint_tools.subprocess.run",
-                return_value=_FakeCompletedProcess(
+                "app.services.manager_blueprint_tools.subprocess.Popen",
+                _fake_popen_factory(
                     returncode=0,
                     stdout="Preparing transaction: done\n",
                     stderr="",
@@ -125,10 +157,8 @@ class CondaInstallSerializationTest(unittest.TestCase):
         with (
             self._patched_resolve_runtime_and_solver(),
             patch(
-                "app.services.manager_blueprint_tools.subprocess.run",
-                return_value=_FakeCompletedProcess(
-                    returncode=0, stdout="", stderr=""
-                ),
+                "app.services.manager_blueprint_tools.subprocess.Popen",
+                _fake_popen_factory(returncode=0, stdout="", stderr=""),
             ),
         ):
             result = self.tools._install_from_plan(

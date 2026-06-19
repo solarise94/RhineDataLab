@@ -28,16 +28,22 @@ Security contract (the router is mounted globally, so these matter):
 
 from __future__ import annotations
 
+import hashlib
 import re
 import shutil
 import tempfile
 import threading
+import time
+import urllib.error
+import urllib.parse
+import urllib.request
 from pathlib import Path
-from typing import Any, BinaryIO, Iterable, Literal
+from typing import Any, BinaryIO, Callable, Iterable, Literal
 
 from pydantic import BaseModel, Field
 
 from app.core.config import Settings, get_settings
+from app.models.card_blueprint import ReferenceDataSourceSpec
 from app.services.utils import atomic_write_json, read_json, sha256_file, utc_now
 
 ReferenceDataKind = Literal["gtf", "fasta", "index", "annotation", "table", "other"]
@@ -45,6 +51,11 @@ ReferenceDataKind = Literal["gtf", "fasta", "index", "annotation", "table", "oth
 # ref_id is generated (content-addressed) but defend the public methods against
 # traversal regardless: only allow this character set in any ref_id we accept.
 _REF_ID_RE = re.compile(r"^[A-Za-z0-9_-]+$")
+
+# Stream / disk pre-check tunables.
+_CHUNK_SIZE = 1024 * 1024
+_DISK_HEADROOM_FACTOR = 0.1
+_MIN_DISK_HEADROOM_BYTES = 64 * 1024 * 1024
 
 
 class ReferenceDataMeta(BaseModel):
@@ -228,6 +239,214 @@ class ReferenceDataService:
             except OSError:
                 pass
         return meta
+
+    def fetch_and_register(
+        self,
+        source: ReferenceDataSourceSpec,
+        cancel_event: threading.Event | None = None,
+        register_handle: Callable[[Any], None] | None = None,
+        progress_callback: Callable[[dict[str, Any]], None] | None = None,
+    ) -> ReferenceDataMeta:
+        """Fetch a reference file from ``source.url`` and ``source.mirrors``,
+        verify its sha256, and register it in the content-addressed registry.
+
+        Retry semantics (B1-retry):
+        - ``reference_download_timeout_s`` is budgeted per attempt.
+        - ``reference_download_retries`` is the total number of transport
+          attempts across the whole URL list, not per-URL.
+        - A sha256 mismatch terminates that URL and advances to the next URL
+          immediately, without consuming a retry slot.
+        - A transport failure (timeout, connection error, HTTP error, etc.)
+          consumes one retry slot.
+
+        The downloaded bytes are streamed through a registry-controlled temp
+        file under ``{registry_root}/_tmp``; the temp file is always removed.
+
+        Layer F2: ``progress_callback`` is invoked with bytes/total/rate info
+        as chunks arrive. Callers are responsible for throttling UI updates.
+        """
+        urls = [source.url, *source.mirrors]
+        if not urls:
+            raise ReferenceDataError("No download URLs provided in source spec.")
+
+        # Registry pre-check: if the sha256 is already registered, return the
+        # existing metadata without any network I/O. Reading under the lock
+        # prevents redundant concurrent downloads of already-known content;
+        # simultaneous downloads of a brand-new sha256 are still deduped by
+        # _ingest when the first one finishes.
+        with self._lock:
+            index_data = self._read_index()
+            for entry in index_data.get("entries", []):
+                if entry.get("sha256") == source.sha256:
+                    return self._load_meta(entry["ref_id"])
+
+        if source.size_hint is not None:
+            self._ensure_dirs()
+            tmp_dir = self._root / "_tmp"
+            tmp_dir.mkdir(parents=True, exist_ok=True)
+            free = shutil.disk_usage(tmp_dir).free
+            headroom = max(
+                int(source.size_hint * _DISK_HEADROOM_FACTOR),
+                _MIN_DISK_HEADROOM_BYTES,
+            )
+            required = source.size_hint + headroom
+            if required > free:
+                raise ReferenceDataError(
+                    f"insufficient_disk_space: need {required} bytes (size_hint "
+                    f"{source.size_hint} + headroom {headroom}) but only {free} "
+                    f"bytes are free in reference-data temp directory ({tmp_dir})."
+                )
+
+        attempts_remaining = max(0, self.settings.reference_download_retries)
+        last_error: Exception | str = "all URLs exhausted"
+
+        for url in urls:
+            if attempts_remaining <= 0:
+                break
+
+            tmp_path: Path | None = None
+            try:
+                tmp_path, digest = self._stream_download(
+                    source,
+                    url,
+                    cancel_event=cancel_event,
+                    register_handle=register_handle,
+                    progress_callback=progress_callback,
+                )
+                if digest != source.sha256:
+                    last_error = ReferenceDataError(
+                        f"sha256 mismatch from {url}: expected {source.sha256}, got {digest}"
+                    )
+                    # Content failure: advance to next URL without spending a retry slot.
+                    continue
+
+                parsed_path = urllib.parse.urlparse(url).path
+                clean_name = (
+                    (source.filename or "").strip()
+                    or Path(parsed_path).name
+                    or "reference_data"
+                )
+                return self._ingest(
+                    tmp_path,
+                    name=clean_name,
+                    kind=source.kind,
+                    description=None,
+                    stored_filename_hint=source.filename,
+                )
+            except (urllib.error.URLError, urllib.error.HTTPError, TimeoutError, OSError) as exc:
+                last_error = exc
+                attempts_remaining -= 1
+            finally:
+                if tmp_path is not None:
+                    try:
+                        tmp_path.unlink(missing_ok=True)
+                    except OSError:
+                        pass
+
+        raise ReferenceDataError(
+            f"Failed to download reference after exhausting URLs: {last_error}"
+        ) from (last_error if isinstance(last_error, Exception) else None)
+
+    def _stream_download(
+        self,
+        source: ReferenceDataSourceSpec,
+        url: str,
+        cancel_event: threading.Event | None = None,
+        register_handle: Callable[[Any], None] | None = None,
+        progress_callback: Callable[[dict[str, Any]], None] | None = None,
+    ) -> tuple[Path, str]:
+        """Stream ``url`` into a registry-owned temp file.
+
+        Returns the temp path and the incremental sha256 digest. The temp file
+        is deleted if any exception is raised.  If ``cancel_event`` is set
+        during streaming, the download aborts promptly.
+
+        Layer F2: reports byte counters to ``progress_callback`` after each
+        chunk. ``source.size_hint`` is used as a total fallback when the
+        server does not provide a ``Content-Length`` header.
+        """
+        self._ensure_dirs()
+        tmp_dir = self._root / "_tmp"
+        tmp_dir.mkdir(parents=True, exist_ok=True)
+        tmp = tempfile.NamedTemporaryFile(
+            dir=tmp_dir, prefix="fetch_", suffix=".bin", delete=False
+        )
+        digest = hashlib.sha256()
+        downloaded = 0
+        start_time = time.monotonic()
+        try:
+            opener = self._build_opener(url)
+            req = urllib.request.Request(url, method="GET")
+            timeout = max(1, self.settings.reference_download_timeout_s)
+            with opener.open(req, timeout=timeout) as response:
+                if register_handle is not None:
+                    register_handle(response)
+                total: int | None = None
+                content_length = response.headers.get("Content-Length")
+                if content_length:
+                    try:
+                        total = int(content_length)
+                    except ValueError:
+                        total = None
+                if total is None and source.size_hint is not None:
+                    total = source.size_hint
+                file_name = Path(urllib.parse.urlparse(url).path).name or "reference_data"
+                while True:
+                    if cancel_event is not None and cancel_event.is_set():
+                        raise ReferenceDataError("cancelled")
+                    chunk = response.read(_CHUNK_SIZE)
+                    if not chunk:
+                        break
+                    tmp.write(chunk)
+                    digest.update(chunk)
+                    downloaded += len(chunk)
+                    if progress_callback is not None:
+                        elapsed = time.monotonic() - start_time
+                        rate_bps = int(downloaded / elapsed) if elapsed > 0 else 0
+                        progress = int(downloaded / total * 100) if total else 0
+                        progress_callback(
+                            {
+                                "bytes_downloaded": downloaded,
+                                "bytes_total": total,
+                                "download_rate_bps": rate_bps,
+                                "progress": progress,
+                                "progress_label": f"Downloading {file_name}",
+                            }
+                        )
+            tmp.close()
+            return Path(tmp.name), digest.hexdigest()
+        except Exception:
+            tmp.close()
+            try:
+                Path(tmp.name).unlink(missing_ok=True)
+            except OSError:
+                pass
+            raise
+
+    def _build_opener(self, url: str) -> urllib.request.OpenerDirector:
+        """Build a urllib opener honoring proxy settings from ``Settings``.
+
+        ``no_proxy`` entries are parsed and matched against the URL host so
+        loopback / local hosts can be excluded from proxying without mutating
+        the global environment.
+        """
+        parsed = urllib.parse.urlparse(url)
+        host = (parsed.hostname or "").lower()
+        no_proxy_raw = (getattr(self.settings, "no_proxy", "") or "").strip()
+        no_proxy_hosts = {
+            h.strip().lower() for h in no_proxy_raw.split(",") if h.strip()
+        }
+        use_proxy = host not in no_proxy_hosts
+
+        proxies: dict[str, str] = {}
+        if use_proxy:
+            http_proxy = (getattr(self.settings, "http_proxy", "") or "").strip()
+            https_proxy = (getattr(self.settings, "https_proxy", "") or "").strip()
+            if http_proxy:
+                proxies["http"] = http_proxy
+            if https_proxy:
+                proxies["https"] = https_proxy
+        return urllib.request.build_opener(urllib.request.ProxyHandler(proxies))
 
     def _ingest(
         self,

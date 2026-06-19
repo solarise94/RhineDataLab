@@ -3,6 +3,7 @@
 import { create } from "zustand";
 import { createJSONStorage, persist } from "zustand/middleware";
 import { ArtifactPreviewRequest } from "@/lib/types";
+import { isActiveDependencyPhase } from "@/lib/dependencyPhases";
 
 export type CardPage = "specialist" | "result" | "detail" | "files" | "archive";
 export type Attachment = { type: "card" | "asset"; id: string; label: string };
@@ -37,6 +38,15 @@ export interface DependencyJobChipState {
   changed?: boolean | null;
   visible: boolean;
   terminalAt?: number;
+  startedAt?: number;
+  // Layer F2: real progress metering.
+  progress?: number | null;
+  progressLabel?: string | null;
+  bytesTotal?: number | null;
+  bytesDownloaded?: number | null;
+  downloadRateBps?: number | null;
+  stdoutTail?: string | null;
+  stderrTail?: string | null;
 }
 
 export const EMPTY_DEPENDENCY_JOBS: Record<string, DependencyJobChipState> = {};
@@ -394,16 +404,7 @@ export const useWorkspaceUiStore = create<WorkspaceUiState>()(
           const projectJobs = state.dependencyJobsByProject[projectId] ?? {};
           const active = Object.entries(projectJobs).filter(([, j]) => {
             const phase = j.phase || j.status;
-            return (
-              phase === "running" ||
-              phase === "queued" ||
-              phase === "launching" ||
-              phase === "waiting" ||
-              phase === "waiting_for_runtime_lock" ||
-              phase === "building_command" ||
-              phase === "launching_subprocess" ||
-              phase === "running_subprocess"
-            );
+            return isActiveDependencyPhase(phase);
           });
           if (active.length === Object.keys(projectJobs).length) return state;
           return {

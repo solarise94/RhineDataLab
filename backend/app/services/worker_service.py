@@ -294,11 +294,18 @@ class WorkerService:
                 isinstance(runtime_dependency_blocker, dict)
                 and str(runtime_dependency_blocker.get("status") or "") in ACTIVE_RUNTIME_DEPENDENCY_JOB_STATUSES
             ):
+                # Layer C: reference-data download blockers use a ref:* dedupe key.
+                dedupe_key = str(runtime_dependency_blocker.get("dedupe_key") or "")
+                is_reference = dedupe_key.startswith("ref:")
                 raise HTTPException(
                     status_code=409,
                     detail={
                         "ok": False,
-                        "message": f"Card {card_id} is waiting for runtime dependency repair to finish.",
+                        "message": (
+                            f"Card {card_id} is waiting for reference data download to finish."
+                            if is_reference
+                            else f"Card {card_id} is waiting for runtime dependency repair to finish."
+                        ),
                         "error_code": "runtime_dependency_repair_in_progress",
                         "card_id": card_id,
                         "job_id": runtime_dependency_blocker.get("job_id"),

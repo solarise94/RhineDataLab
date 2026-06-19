@@ -27,6 +27,37 @@ const MANAGER_COMPACTION_KEEP_RECENT_TOKENS = Number(process.env.MANAGER_COMPACT
 const MANAGER_COMPACTION_RESERVE_TOKENS = Number(process.env.MANAGER_COMPACTION_RESERVE_TOKENS || "16000");
 const PROVIDER_MAX_RETRIES = Number(process.env.MANAGER_AGENT_PROVIDER_MAX_RETRIES || "5");
 const PROVIDER_MAX_RETRY_DELAY_MS = Number(process.env.MANAGER_AGENT_PROVIDER_MAX_RETRY_DELAY_MS || "16000");
+const MANAGER_HTTP_PROXY = process.env.MANAGER_HTTP_PROXY || "";
+const MANAGER_HTTPS_PROXY = process.env.MANAGER_HTTPS_PROXY || "";
+const MANAGER_NO_PROXY = process.env.MANAGER_NO_PROXY || "";
+
+// Wire egress proxy for Tavily websearch when undici is available. Node's
+// global fetch ignores HTTP_PROXY/HTTPS_PROXY by default; undici's global
+// dispatcher is the minimal way to honor it without per-call changes.
+async function initGlobalProxyDispatcher() {
+  if (!MANAGER_WEBSEARCH_ENABLED) {
+    return;
+  }
+  const proxyUrl = MANAGER_HTTPS_PROXY || MANAGER_HTTP_PROXY;
+  if (!proxyUrl) {
+    return;
+  }
+  try {
+    const { ProxyAgent, setGlobalDispatcher } = await import("undici");
+    setGlobalDispatcher(new ProxyAgent(proxyUrl));
+    logManagerEvent("proxy_dispatcher_initialized", {
+      proxy_url: proxyUrl.replace(/\/\/[^:@]*:[^@]*@/, "//***:***@"),
+      no_proxy: MANAGER_NO_PROXY,
+    });
+  } catch (error) {
+    logManagerEvent("proxy_dispatcher_init_failed", {
+      reason: error instanceof Error ? error.message : String(error),
+      hint: "Install the undici package to enable Tavily proxy support.",
+    });
+  }
+}
+
+initGlobalProxyDispatcher();
 
 function resolveManagerConfig(payload = {}) {
   const config = payload.manager_config && typeof payload.manager_config === "object" ? payload.manager_config : {};

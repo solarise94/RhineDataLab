@@ -205,10 +205,22 @@ def get_background_workboard_service() -> BackgroundWorkboardService:
 
 @lru_cache
 def get_card_library_service() -> CardLibraryService:
+    project_service = get_project_service()
+    runtime_dependency_job_service = get_runtime_dependency_job_service()
+    # Layer C: wire the reference-download handler so blueprint instantiation
+    # can submit background download jobs for source-only reference assets.
+    from app.services.manager_blueprint_tools import ManagerBlueprintTools
+
+    manager_tools = ManagerBlueprintTools(
+        project_service=project_service,
+        runtime_dependency_job_service=runtime_dependency_job_service,
+    )
     return CardLibraryService(
-        get_project_service(),
+        project_service,
         library_registry_service=get_library_registry_service(),
         runtime_dependency_resolver_service=get_runtime_dependency_resolver_service(),
+        runtime_dependency_job_service=runtime_dependency_job_service,
+        reference_download_handler=manager_tools._download_reference_asset_sync,
     )
 
 

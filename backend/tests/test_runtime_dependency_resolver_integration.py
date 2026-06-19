@@ -8,6 +8,7 @@ structured fallback actions without executing them automatically.
 
 from __future__ import annotations
 
+import io
 import json
 import subprocess
 import tempfile
@@ -217,15 +218,29 @@ class ResolverFirstInstallerTest(unittest.TestCase):
         def _mock_channel_sig(_self, conda_bin, ecosystem, runtime, *, conda_base=None, extra_channels=None):
             return f"mock:{getattr(conda_bin, 'name', conda_bin)}:{ecosystem}:{runtime}"
 
-        installer_completed = subprocess.CompletedProcess(args=[], returncode=0, stdout="installed\n", stderr="")
-        # Keep *all* patches alive through the entire submit + poll
-        # window.  The background thread calls subprocess.run inside
-        # _run_dependency_command, which is defined in
-        # manager_blueprint_tools — the patch on that module's
-        # subprocess.run must still be active while we poll.
+        def _fake_command_runner(project_id, command, *, ecosystem, runtime, resolved_runtime, packages, manager_name, timeout, started_at, phase_callback=None, **kwargs):
+            if phase_callback:
+                phase_callback("running_subprocess", command_preview=command)
+            return {
+                "ok": True,
+                "status_detail": "install_completed",
+                "changed": True,
+                "message": "Dependencies installed.",
+                "stdout_tail": "installed\n",
+                "stderr_tail": "",
+                "returncode": 0,
+                "ecosystem": ecosystem,
+                "runtime": runtime,
+                "resolved_runtime": resolved_runtime,
+                "packages": packages,
+                "manager": manager_name,
+            }
+
+        # Keep the command-runner patch alive through the submit + poll
+        # window so the background job sees the mock.
         with patch.object(RuntimeDependencyResolverService, "_probe_conda", _mock_probe), \
              patch.object(RuntimeDependencyResolverService, "_channel_signature", _mock_channel_sig), \
-             patch("app.services.manager_blueprint_tools.subprocess.run", return_value=installer_completed):
+             patch.object(manager.blueprint_tools, "_run_dependency_command", _fake_command_runner):
             response = manager.blueprint_tools.install_runtime_dependencies(
                 "test-project",
                 {
@@ -348,10 +363,27 @@ class ResolverFirstInstallerTest(unittest.TestCase):
         def _mock_channel_sig(_self, conda_bin, ecosystem, runtime, *, conda_base=None, extra_channels=None):
             return f"mock:{getattr(conda_bin, 'name', conda_bin)}:{ecosystem}:{runtime}"
 
-        installer_completed = subprocess.CompletedProcess(args=[], returncode=0, stdout="installed\n", stderr="")
+        def _fake_command_runner(project_id, command, *, ecosystem, runtime, resolved_runtime, packages, manager_name, timeout, started_at, phase_callback=None, **kwargs):
+            if phase_callback:
+                phase_callback("running_subprocess", command_preview=command)
+            return {
+                "ok": True,
+                "status_detail": "install_completed",
+                "changed": True,
+                "message": "Dependencies installed.",
+                "stdout_tail": "installed\n",
+                "stderr_tail": "",
+                "returncode": 0,
+                "ecosystem": ecosystem,
+                "runtime": runtime,
+                "resolved_runtime": resolved_runtime,
+                "packages": packages,
+                "manager": manager_name,
+            }
+
         with patch.object(RuntimeDependencyResolverService, "_probe_conda", _mock_probe), \
              patch.object(RuntimeDependencyResolverService, "_channel_signature", _mock_channel_sig), \
-             patch("app.services.manager_blueprint_tools.subprocess.run", return_value=installer_completed):
+             patch.object(manager.blueprint_tools, "_run_dependency_command", _fake_command_runner):
             plan = manager.blueprint_tools.resolve_runtime_dependencies(
                 "test-project",
                 {

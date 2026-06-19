@@ -28,6 +28,7 @@ from app.models.card_blueprint import (
     InstantiateRequest,
     InstantiateResult,
     PublishDraftResponse,
+    ReferenceAssetRef,
     SaveResult,
     UpdateBlueprintRequest,
     UpdateProjectDraftRequest,
@@ -38,6 +39,7 @@ from app.models.graph import Asset, GraphState
 from app.models.output_contracts import CardOutputSpec, normalize_output_format
 from app.services.asset_materialization_service import AssetMaterializationService
 from app.services.project_service import ProjectService
+from app.services.runtime_dependency_job_service import RuntimeDependencyJobService
 from app.services.runtime_dependency_resolver_service import RuntimeDependencyResolverService
 from app.services.blueprint_review_worker import BlueprintReviewWorker
 from app.services.card_desensitization_service import CardDesensitizationService
@@ -93,10 +95,14 @@ class CardLibraryService:
         settings: Settings | None = None,
         library_registry_service: LibraryRegistryService | None = None,
         runtime_dependency_resolver_service: RuntimeDependencyResolverService | None = None,
+        runtime_dependency_job_service: RuntimeDependencyJobService | None = None,
+        reference_download_handler: Any | None = None,
     ) -> None:
         self.project_service = project_service
         self.settings = settings or get_settings()
         self.library_registry_service = library_registry_service
+        self.runtime_dependency_job_service = runtime_dependency_job_service
+        self.reference_download_handler = reference_download_handler
         self.runtime_dependency_resolver_service = (
             runtime_dependency_resolver_service or RuntimeDependencyResolverService()
         )
@@ -341,6 +347,29 @@ class CardLibraryService:
 
         return usages
 
+    def _ref_id_for_path(self, host_path: str | Path) -> str | None:
+        """Return the reference-data registry ``ref_id`` whose stored file
+        resolves to ``host_path``.
+
+        Used when generalizing an instantiated card back into a blueprint so
+        that ``reference_assets`` round-trip.
+        """
+        target = Path(host_path).resolve()
+        root = Path(self.settings.data_root) / "_system" / "reference-data"
+        index_data = read_json(root / "index.json", {"entries": []})
+        for entry in index_data.get("entries", []):
+            ref_id = entry.get("ref_id")
+            if not ref_id:
+                continue
+            meta = read_json(root / ref_id / "meta.json", {})
+            stored_filename = meta.get("stored_filename")
+            if not stored_filename:
+                continue
+            candidate = (root / ref_id / "data" / stored_filename).resolve()
+            if candidate == target:
+                return ref_id
+        return None
+
     def _build_blueprint_from_card(self, project_id: str, card_id: str) -> CardBlueprint:
         """Extract, desensitize, and build a CardBlueprint from a project card."""
         # Read source card
@@ -404,6 +433,21 @@ class CardLibraryService:
                 required=out.required,
             ))
 
+        # Reference assets — recover from the card's resolved references so the
+        # generalized blueprint keeps its environment-level dependencies.
+        reference_assets: list[ReferenceAssetRef] = []
+        ec = source_card.executor_context
+        if ec:
+            reference_paths = ec.template_metadata.get("reference_paths", {})
+            for role, host_path in reference_paths.items():
+                ref_id = self._ref_id_for_path(host_path)
+                if ref_id:
+                    reference_assets.append(ReferenceAssetRef(
+                        ref_id=ref_id,
+                        role=role,
+                        required=True,
+                    ))
+
         with self._lock:
             blueprint_id = self._generate_blueprint_id(title)
             now = utc_now()
@@ -416,6 +460,7 @@ class CardLibraryService:
                 skills=skills,
                 mcp_servers=mcp_servers,
                 runtime_requirements=runtime_requirements,
+                reference_assets=reference_assets,
                 inputs_schema=inputs_schema,
                 outputs_schema=outputs_schema,
                 parameters=[],  # No parameters from card
@@ -1099,15 +1144,22 @@ class CardLibraryService:
         # ── Validate + resolve reference-data dependencies ───────────────
         # Reference data are environment-level files (GTF/FASTA/...) resolved
         # to host paths here and passed to the executor as file references.
+        # Layer C: source-only refs become background download jobs instead of
+        # hard blockers; missing required refs with no source still block.
         resolved_references: list[ExecutorReference] = []
         reference_paths: dict[str, str] = {}
+        pending_reference_downloads: list[dict[str, Any]] = []
         if bp.reference_assets:
             ref_service = ReferenceDataService(self.settings)
             for ref in bp.reference_assets:
                 try:
                     host_path = ref_service.resolve(ref.ref_id)
                 except ReferenceDataError:
-                    if ref.required:
+                    if ref.source is not None:
+                        pending_reference_downloads.append(
+                            {"role": ref.role, "source": ref.source.model_dump()}
+                        )
+                    elif ref.required:
                         blockers.append(
                             f"Required reference data '{ref.role}' (ref_id: {ref.ref_id}) "
                             "is not available in the registry."
@@ -1198,6 +1250,30 @@ class CardLibraryService:
                 blockers=[f"Failed to save card to project: {exc}"],
             )
 
+        # Layer C: submit background download jobs for source-only references
+        # now that the card exists and can be associated with the jobs.
+        submitted_job_ids: list[str] = []
+        if pending_reference_downloads and self.runtime_dependency_job_service is not None and self.reference_download_handler is not None:
+            for descriptor in pending_reference_downloads:
+                try:
+                    job = self.runtime_dependency_job_service.submit(
+                        project_id,
+                        {
+                            "source": {
+                                "card_id": card_id,
+                                "spec": descriptor["source"],
+                            },
+                            "role": descriptor["role"],
+                        },
+                        self.reference_download_handler,
+                        task_type="reference_data_download",
+                    )
+                    submitted_job_ids.append(job.job_id)
+                except Exception as exc:
+                    warnings.append(
+                        f"Failed to queue reference download for '{descriptor['role']}': {exc}"
+                    )
+
         # Update provenance
         with self._lock:
             try:
@@ -1210,7 +1286,19 @@ class CardLibraryService:
             except Exception:
                 warnings.append("Provenance update failed (card was created successfully).")
 
-        return InstantiateResult(card_id=card_id, warnings=warnings, blockers=blockers)
+        pending_downloads_out: list[dict[str, Any]] = []
+        for i, descriptor in enumerate(pending_reference_downloads):
+            entry = dict(descriptor)
+            if i < len(submitted_job_ids):
+                entry["job_id"] = submitted_job_ids[i]
+            pending_downloads_out.append(entry)
+
+        return InstantiateResult(
+            card_id=card_id,
+            warnings=warnings,
+            blockers=blockers,
+            pending_reference_downloads=pending_downloads_out,
+        )
 
     def export_blueprint(self, blueprint_id: str) -> dict[str, Any]:
         """Export a blueprint as a JSON-serializable dict."""

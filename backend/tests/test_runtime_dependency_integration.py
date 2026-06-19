@@ -131,7 +131,7 @@ class RuntimeDependencyIntegrationTest(unittest.TestCase):
                 "runtime": "R_env",
                 "packages": ["edgeR"],
             },
-            handler=lambda _pid, _payload, phase_callback=None: (
+            handler=lambda _pid, _payload, phase_callback=None, **kwargs: (
                 phase_callback("running_subprocess", command_preview=["mamba", "install", "bioconductor-edger"])
                 or {"ok": True}
             ),
@@ -866,6 +866,82 @@ class RuntimeDependencyIntegrationTest(unittest.TestCase):
             self.assertEqual(disk_jobs[0]["status"], "running")
         finally:
             job_service._persist_project_jobs_locked = original_persist
+
+    def test_progress_fields_round_trip_through_persist_and_event(self):
+        """Layer F2: progress fields are persisted, loaded, and emitted on SSE."""
+        from app.services.project_event_service import ProjectEventService
+
+        events = []
+        event_service = ProjectEventService(self.project_service)
+        event_service._publish = lambda pid, ev: events.append(ev)
+
+        job_service = RuntimeDependencyJobService(
+            self.project_service,
+            project_event_service=event_service,
+            background_task_service=self.background_task_service,
+        )
+
+        def handler(_pid, _payload, phase_callback=None, **kwargs):
+            phase_callback(
+                "running_subprocess",
+                command_preview=["pip", "install", "numpy"],
+                progress=42,
+                progress_label="Downloading numpy",
+                bytes_total=16 * 1024 * 1024,
+                bytes_downloaded=7 * 1024 * 1024,
+                download_rate_bps=1024 * 1024,
+                stdout_tail="Downloading numpy...",
+                stderr_tail="",
+            )
+            return {"ok": True, "changed": True}
+
+        job = job_service.submit(
+            "test-project",
+            {"ecosystem": "python", "runtime": "py_env", "packages": ["numpy"]},
+            handler=handler,
+        )
+        if job.future:
+            job.future.result(timeout=5)
+
+        # In-memory job
+        self.assertEqual(job.progress, 42)
+        self.assertEqual(job.progress_label, "Downloading numpy")
+        self.assertEqual(job.bytes_total, 16 * 1024 * 1024)
+        self.assertEqual(job.bytes_downloaded, 7 * 1024 * 1024)
+        self.assertEqual(job.download_rate_bps, 1024 * 1024)
+
+        # Persisted JSON round-trip
+        disk_jobs = json.loads(self.jobs_path.read_text(encoding="utf-8"))
+        self.assertEqual(len(disk_jobs), 1)
+        disk = disk_jobs[0]
+        self.assertEqual(disk["progress"], 42)
+        self.assertEqual(disk["progress_label"], "Downloading numpy")
+        self.assertEqual(disk["bytes_total"], 16 * 1024 * 1024)
+        self.assertEqual(disk["bytes_downloaded"], 7 * 1024 * 1024)
+        self.assertEqual(disk["download_rate_bps"], 1024 * 1024)
+
+        # SSE payload includes progress fields
+        running_events = [
+            e
+            for e in events
+            if e.get("payload", {}).get("phase") == "running_subprocess"
+        ]
+        self.assertTrue(running_events)
+        payload = running_events[-1]["payload"]
+        self.assertEqual(payload["progress"], 42)
+        self.assertEqual(payload["progress_label"], "Downloading numpy")
+        self.assertEqual(payload["bytes_total"], 16 * 1024 * 1024)
+        self.assertIn("stdout_tail", payload)
+
+        # Reload from disk preserves progress fields
+        fresh_service = RuntimeDependencyJobService(
+            self.project_service,
+            background_task_service=self.background_task_service,
+        )
+        fresh_service.get_for_project("test-project", job.job_id)
+        reloaded = fresh_service.get_for_project("test-project", job.job_id)
+        self.assertIsNotNone(reloaded)
+        self.assertEqual(reloaded.progress, 42)
 
 
 if __name__ == "__main__":

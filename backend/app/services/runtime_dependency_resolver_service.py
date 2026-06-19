@@ -601,6 +601,52 @@ class RuntimeDependencyResolverService:
                 plan.retry_hint = mapping["retry_hint"]
         return plan
 
+    def resolve_reference_download(
+        self,
+        project_id: str,
+        payload: dict[str, Any],
+        *,
+        settings: Any | None = None,
+    ) -> dict[str, Any]:
+        """Plan-only resolver path for reference-data downloads (Layer C).
+
+        Returns a plan-shaped dict that tells Manager "a background download
+        job will be created for this source".  This keeps Manager's
+        ``resolve_runtime_dependencies`` "what would happen?" accurate for
+        reference assets without forking the job machinery.
+        """
+        source_container = payload.get("source") if isinstance(payload.get("source"), dict) else {}
+        source_spec = source_container.get("spec") if isinstance(source_container, dict) else None
+        role = str(payload.get("role") or source_container.get("role") or "").strip()
+        if not isinstance(source_spec, dict) or not source_spec.get("sha256"):
+            return {
+                "ok": False,
+                "tool": "resolve_reference_download",
+                "background": False,
+                "async_boundary": False,
+                "do_not_poll": False,
+                "wait_for_wake": False,
+                "status": RESOLVER_STATUS_RESOLUTION_UNKNOWN,
+                "error_code": "invalid_reference_payload",
+                "retry_hint": "manual_preparation_required",
+                "message": "Reference download payload is missing a valid source spec.",
+            }
+        sha256 = str(source_spec["sha256"]).strip()
+        return {
+            "ok": True,
+            "tool": "resolve_reference_download",
+            "background": True,
+            "async_boundary": True,
+            "do_not_poll": True,
+            "wait_for_wake": True,
+            "status": RESOLVER_STATUS_FULLY_INSTALLABLE,
+            "descriptor": {
+                "role": role,
+                "source": source_spec,
+            },
+            "request_dedupe_key": f"ref:{sha256}",
+        }
+
     # -- internals ---------------------------------------------------------
 
     def _batch_prefetch_conda(

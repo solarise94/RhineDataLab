@@ -617,6 +617,12 @@ export const api = {
       status_detail?: string | null;
       changed?: boolean | null;
       phase?: string | null;
+      // Layer F2: progress fields
+      progress?: number | null;
+      progress_label?: string | null;
+      bytes_total?: number | null;
+      bytes_downloaded?: number | null;
+      download_rate_bps?: number | null;
     }>(`/projects/${projectId}/runtime-dependency-jobs/${jobId}`);
   },
   resolveRuntimeDependencies(

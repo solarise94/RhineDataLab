@@ -1,9 +1,17 @@
 "use client";
 
-import { useEffect, useMemo, useRef } from "react";
+import { useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { Loader2, CheckCircle2, AlertCircle } from "lucide-react";
 import { api } from "@/lib/api";
-import { EMPTY_DEPENDENCY_JOBS, useWorkspaceUiStore } from "@/lib/stores/workspace-ui-store";
+import {
+  getDependencyPhaseStep,
+  isActiveDependencyPhase,
+} from "@/lib/dependencyPhases";
+import {
+  DependencyJobChipState,
+  EMPTY_DEPENDENCY_JOBS,
+  useWorkspaceUiStore,
+} from "@/lib/stores/workspace-ui-store";
 
 const DISMISS_AFTER_MS = 2400;
 
@@ -26,24 +34,15 @@ export function DependencyJobChip({ projectId, className }: DependencyJobChipPro
   const entries = useMemo(() => Object.values(jobs), [jobs]);
 
   const activeEntries = useMemo(
-    () =>
-      entries.filter((e) => {
-        const phase = e.phase || e.status;
-        return (
-          phase === "running" ||
-          phase === "queued" ||
-          phase === "waiting" ||
-          phase === "launching" ||
-          phase === "waiting_for_runtime_lock" ||
-          phase === "building_command" ||
-          phase === "launching_subprocess" ||
-          phase === "running_subprocess"
-        );
-      }),
+    () => entries.filter((e) => isActiveDependencyPhase(e.phase || e.status)),
     [entries]
   );
   const activeEntriesRef = useRef(activeEntries);
   activeEntriesRef.current = activeEntries;
+
+  const firstActiveEntry = activeEntries[0];
+  const phaseStep = getDependencyPhaseStep(firstActiveEntry?.phase);
+  const elapsedSeconds = useElapsed(firstActiveEntry?.startedAt);
 
   const terminalEntries = useMemo(
     () =>
@@ -118,6 +117,10 @@ export function DependencyJobChip({ projectId, className }: DependencyJobChipPro
       for (const entry of entriesToPoll) {
         try {
           const job = await api.getRuntimeDependencyJob(projectId, entry.jobId);
+          const startedAt = job.started_at ? new Date(job.started_at).getTime() : undefined;
+          if (startedAt) {
+            updateDependencyJob(projectId, entry.jobId, { startedAt });
+          }
           if (job.status === "succeeded" || job.status === "failed") {
             const changed = job.changed ?? null;
             const statusDetail = job.status_detail || undefined;
@@ -149,51 +152,144 @@ export function DependencyJobChip({ projectId, className }: DependencyJobChipPro
   }, [projectId, updateDependencyJob]);
 
   // Pick the single chip to render
-  const chip = useMemo(() => {
+  const chipNode = useMemo<ReactNode>(() => {
     if (activeEntries.length > 0) {
-      return activeChip(activeEntries);
+      return (
+        <ActiveJobChip
+          entry={activeEntries[0]}
+          phaseStep={phaseStep}
+          elapsedSeconds={elapsedSeconds}
+          className={className}
+        />
+      );
     }
     if (terminalEntries.length > 0) {
       // Show the most recent terminal entry
-      return terminalChip(
+      const chip = terminalChip(
         terminalEntries.reduce((latest, e) =>
           (e.terminalAt ?? 0) > (latest.terminalAt ?? 0) ? e : latest
         )
       );
+      return (
+        <div
+          className={`dependency-chip ${chip.variant}${
+            className ? ` ${className}` : ""
+          }`}
+        >
+          {chip.icon}
+          <span>{chip.text}</span>
+        </div>
+      );
     }
     return null;
-  }, [activeEntries, terminalEntries]);
+  }, [activeEntries, terminalEntries, phaseStep, elapsedSeconds, className]);
 
-  if (!chip) return null;
+  if (!chipNode) return null;
+
+  return chipNode;
+}
+
+function ActiveJobChip({
+  entry,
+  phaseStep,
+  elapsedSeconds,
+  className,
+}: {
+  entry: DependencyJobChipState;
+  phaseStep: ReturnType<typeof getDependencyPhaseStep>;
+  elapsedSeconds: number | null;
+  className?: string;
+}) {
+  const firstPkg = entry.packages?.[0];
+  const baseText =
+    entry.packages && entry.packages.length === 1 && firstPkg
+      ? `正在安装 ${firstPkg}`
+      : entry.packages && entry.packages.length > 1
+      ? `正在处理 ${entry.packages.length} 个依赖`
+      : "依赖处理中";
+  const progress = entry.progress;
+  const hasProgress = typeof progress === "number" && progress > 0;
+  const lastLog = lastLine(entry.stdoutTail || entry.stderrTail);
+
+  if (hasProgress) {
+    return (
+      <div
+        className={`dependency-chip running has-progress${
+          className ? ` ${className}` : ""
+        }`}
+      >
+        <div className="dependency-chip-main">
+          <Loader2 size={14} className="spinning" />
+          <span className="dependency-chip-label">
+            {entry.progressLabel || baseText}
+          </span>
+          <span className="dependency-chip-rate">
+            {formatRate(entry.downloadRateBps)}
+          </span>
+        </div>
+        <div className="dependency-chip-progress">
+          <div
+            style={{
+              width: `${Math.min(100, Math.max(0, progress))}%`,
+            }}
+          />
+        </div>
+        {lastLog ? <div className="dependency-chip-log">{lastLog}</div> : null}
+      </div>
+    );
+  }
+
+  const parts = [baseText];
+  if (phaseStep) {
+    parts.push(`步骤 ${phaseStep.step}/5 · ${phaseStep.label}`);
+  }
+  if (elapsedSeconds !== null) {
+    parts.push(`已运行 ${formatElapsed(elapsedSeconds)}`);
+  }
 
   return (
-    <div className={`dependency-chip ${chip.variant}${className ? ` ${className}` : ""}`}>
-      {chip.icon}
-      <span>{chip.text}</span>
+    <div
+      className={`dependency-chip running${className ? ` ${className}` : ""}`}
+    >
+      <Loader2 size={14} className="spinning" />
+      <span>{parts.join(" · ")}</span>
     </div>
   );
 }
 
-function activeChip(
-  entries: Array<{
-    packages?: string[];
-    runtime?: string;
-    jobId: string;
-  }>
-) {
-  const firstPkg = entries[0]?.packages?.[0];
-  const text =
-    entries.length === 1 && firstPkg
-      ? `正在安装 ${firstPkg}...`
-      : entries.length === 1
-      ? "依赖处理中..."
-      : `正在处理 ${entries.length} 个依赖任务`;
+function useElapsed(startedAt?: number) {
+  const [now, setNow] = useState(() => Date.now());
+  useEffect(() => {
+    if (!startedAt) return;
+    setNow(Date.now());
+    const interval = window.setInterval(() => setNow(Date.now()), 1_000);
+    return () => window.clearInterval(interval);
+  }, [startedAt]);
+  return startedAt ? Math.max(0, Math.floor((now - startedAt) / 1_000)) : null;
+}
 
-  return {
-    variant: "running" as const,
-    text,
-    icon: <Loader2 size={14} className="spinning" />,
-  };
+function formatElapsed(seconds: number): string {
+  if (seconds < 60) return `${seconds}s`;
+  const mins = Math.floor(seconds / 60);
+  const secs = seconds % 60;
+  if (mins < 60) return `${mins}m ${secs}s`;
+  const hours = Math.floor(mins / 60);
+  const remainingMins = mins % 60;
+  return `${hours}h ${remainingMins}m`;
+}
+
+function formatRate(bps?: number | null): string {
+  if (bps == null || bps <= 0) return "";
+  if (bps < 1024) return `${bps} B/s`;
+  if (bps < 1024 * 1024) return `${(bps / 1024).toFixed(1)} kB/s`;
+  if (bps < 1024 * 1024 * 1024) return `${(bps / (1024 * 1024)).toFixed(1)} MB/s`;
+  return `${(bps / (1024 * 1024 * 1024)).toFixed(1)} GB/s`;
+}
+
+function lastLine(tail?: string | null): string | null {
+  if (!tail) return null;
+  const lines = tail.split("\n").map((l) => l.trim()).filter(Boolean);
+  return lines.length ? lines[lines.length - 1] : null;
 }
 
 function terminalChip(

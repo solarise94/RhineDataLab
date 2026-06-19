@@ -255,4 +255,5 @@ def instantiate_blueprint(
         "card_id": result.card_id,
         "warnings": result.warnings,
         "blockers": result.blockers,
+        "pending_reference_downloads": result.pending_reference_downloads,
     }

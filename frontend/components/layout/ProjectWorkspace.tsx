@@ -39,6 +39,7 @@ import {
 import { Card, ExecutorProfile, ReportExportResponse } from "@/lib/types";
 import { SideNav } from "./SideNav";
 import { ProjectHeader } from "./ProjectHeader";
+import { isActiveDependencyPhase } from "@/lib/dependencyPhases";
 import { DependencyJobChip } from "@/components/dependency/DependencyJobChip";
 import { ManagerChatPanel } from "@/components/manager-chat/ManagerChatPanel";
 import { CardStream } from "@/components/cards/CardStream";
@@ -286,6 +287,14 @@ export function ProjectWorkspace({ projectId, view }: { projectId: string; view:
             status_detail?: string;
             changed?: boolean;
             phase?: string;
+            // Layer F2: progress fields
+            progress?: number;
+            progress_label?: string;
+            bytes_total?: number;
+            bytes_downloaded?: number;
+            download_rate_bps?: number;
+            stdout_tail?: string;
+            stderr_tail?: string;
           };
         };
         if (raw.type === "heartbeat") {
@@ -385,14 +394,18 @@ export function ProjectWorkspace({ projectId, view }: { projectId: string; view:
             }
           } else {
             // Active job (running or pre-launch phases)
-            const activeStatuses = new Set([
-              "queued", "waiting", "launching", "running",
-              "waiting_for_runtime_lock", "building_command",
-              "launching_subprocess", "running_subprocess",
-            ]);
             const phase = eventPayload.phase || raw.job_status;
-            if (jobId && phase && activeStatuses.has(phase)) {
+            if (jobId && phase && isActiveDependencyPhase(phase)) {
               const existing = useWorkspaceUiStore.getState().dependencyJobsByProject[projectId]?.[jobId];
+              const progressUpdate = {
+                progress: eventPayload.progress ?? existing?.progress ?? null,
+                progressLabel: eventPayload.progress_label ?? existing?.progressLabel ?? null,
+                bytesTotal: eventPayload.bytes_total ?? existing?.bytesTotal ?? null,
+                bytesDownloaded: eventPayload.bytes_downloaded ?? existing?.bytesDownloaded ?? null,
+                downloadRateBps: eventPayload.download_rate_bps ?? existing?.downloadRateBps ?? null,
+                stdoutTail: eventPayload.stdout_tail ?? existing?.stdoutTail ?? null,
+                stderrTail: eventPayload.stderr_tail ?? existing?.stderrTail ?? null,
+              };
               if (!existing) {
                 registerDependencyJob(projectId, {
                   jobId,
@@ -401,12 +414,14 @@ export function ProjectWorkspace({ projectId, view }: { projectId: string; view:
                   packages: pkgs,
                   runtime,
                   visible: true,
+                  ...progressUpdate,
                 });
               } else {
                 updateDependencyJob(projectId, jobId, {
                   status: raw.job_status || phase,
                   phase,
                   visible: true,
+                  ...progressUpdate,
                 });
               }
             }

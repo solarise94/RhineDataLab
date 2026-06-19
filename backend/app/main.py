@@ -8,6 +8,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from app.api import advanced, app_settings, card_library, chat, chat_sessions, diagnostics, executor_profiles, files, library, manager_auto, manager_tools, project_events, projects, reference_data, report, results, runs, workspace_roots
 from app.api.deps import get_app_config_service, get_manager_auto_service, get_project_file_service, get_project_service, get_runtime_dependency_job_service, get_worker_service, inject_wake_dispatch
 from app.core.config import get_settings
+from app.core.proxy import configure_os_proxy
 
 settings = get_settings()
 logger = logging.getLogger(__name__)
@@ -15,6 +16,9 @@ _STARTED_MONOTONIC = time.monotonic()
 
 
 def initialize_runtime_services() -> None:
+    # Re-export proxy settings to os.environ so subprocess installers and
+    # urllib-based downloads honor them automatically (Layer D).
+    configure_os_proxy(settings)
     get_app_config_service()
     get_worker_service()
     # Doc 42: Initialize ManagerAutoService and inject wake dispatch.

@@ -5,7 +5,14 @@ from typing import Any, Literal
 from pydantic import BaseModel, Field
 
 
-BackgroundTaskType = Literal["card_run", "runtime_dependency_install", "batch_card_start", "cleanup"]
+BackgroundTaskType = Literal[
+    "card_run",
+    "runtime_dependency_install",
+    "runtime_dependency_create",
+    "reference_data_download",
+    "batch_card_start",
+    "cleanup",
+]
 BackgroundTaskStatus = Literal["queued", "launching", "running", "waiting", "succeeded", "failed", "cancelled", "interrupted"]
 WorkboardLane = Literal["running", "todo", "needs_manager", "completed", "ready_to_start", "blocked_for_user", "deferred"]
 WorkboardConsumptionStatus = Literal["pending", "claimed", "processing", "done", "deferred", "failed", "blocked_for_user"]

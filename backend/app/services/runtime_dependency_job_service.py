@@ -14,7 +14,10 @@ from app.models.chat import ChatSessionMessage, ChatSessionMessageTimelineItem
 from app.services.background_task_service import BackgroundTaskService
 from app.services.project_event_service import ProjectEventService
 from app.services.project_service import ProjectService
-from app.services.runtime_dependency_state_service import runtime_dependency_failure_details
+from app.services.runtime_dependency_state_service import (
+    ACTIVE_RUNTIME_DEPENDENCY_JOB_STATUSES,
+    runtime_dependency_failure_details,
+)
 from app.services.utils import atomic_write_json, read_json, utc_now
 
 
@@ -44,27 +47,45 @@ class RuntimeDependencyJob:
     child_pid: int | None = None
     log_path: str | None = None
     last_heartbeat_at: str | None = None
+    # Repurposed from dead placeholders: timestamp of the most recent stdout/stderr
+    # line the handler reported. Used by the watchdog to distinguish "slow but
+    # alive" from "dead" (F3).
     last_stdout_at: str | None = None
     last_stderr_at: str | None = None
     stdout_tail: str = ""
     stderr_tail: str = ""
+    # Layer F2: real progress metering for package installs and reference downloads.
+    progress: int = 0
+    progress_label: str | None = None
+    bytes_total: int | None = None
+    bytes_downloaded: int | None = None
+    download_rate_bps: int | None = None
 
 
 class RuntimeDependencyJobService:
     def __init__(
         self,
         project_service: ProjectService,
-        max_workers: int = 2,
+        max_workers: int | None = None,
         project_event_service: ProjectEventService | None = None,
         background_task_service: BackgroundTaskService | None = None,
         background_terminal_callback: Callable[[str, str | None, str | None], None] | None = None,
         chat_session_service: Any | None = None,
+        max_install_workers: int = 2,
+        max_download_workers: int = 1,
     ) -> None:
         self.project_service = project_service
-        self.executor = ThreadPoolExecutor(max_workers=max_workers, thread_name_prefix="runtime-deps")
+        effective_max_workers = max_workers if max_workers is not None else max_install_workers + max_download_workers
+        self.executor = ThreadPoolExecutor(max_workers=effective_max_workers, thread_name_prefix="runtime-deps")
         self.jobs: dict[str, RuntimeDependencyJob] = {}
         self.lock = threading.Lock()
         self.runtime_locks: dict[tuple[str, str], threading.Lock] = {}
+        # Layer C: kind-semaphores over the shared pool so downloads and
+        # installs cannot starve one another.
+        self._install_semaphore = threading.Semaphore(max_install_workers)
+        self._download_semaphore = threading.Semaphore(max_download_workers)
+        self._cancel_events: dict[str, threading.Event] = {}
+        self._cancel_handles: dict[str, Any] = {}
         self.project_event_service = project_event_service
         self.background_task_service = background_task_service or BackgroundTaskService(project_service)
         self.background_terminal_callback = background_terminal_callback
@@ -172,6 +193,78 @@ class RuntimeDependencyJobService:
             self._publish_terminal_chat_receipt(job)
         return job
 
+    def cancel(self, project_id: str, job_id: str) -> dict[str, Any]:
+        """Best-effort cancellation of an active dependency job.
+
+        Sets a per-job cancellation flag and closes any registered I/O handle
+        (e.g. a urllib response for reference downloads). The handler is
+        responsible for detecting the cancellation and returning a failed
+        result with error_code ``cancelled``.
+        """
+        with self.lock:
+            self._load_project_jobs_locked(project_id)
+            job = self.jobs.get(job_id)
+            if job is None or job.project_id != project_id:
+                raise HTTPException(status_code=404, detail="Runtime dependency job not found")
+            if job.status not in ACTIVE_RUNTIME_DEPENDENCY_JOB_STATUSES:
+                raise HTTPException(
+                    status_code=409,
+                    detail=f"Job {job_id} is not active (status={job.status}).",
+                )
+            event = self._cancel_events.setdefault(job_id, threading.Event())
+            event.set()
+            handle = self._cancel_handles.get(job_id)
+            if handle is not None:
+                try:
+                    handle.close()
+                except Exception:
+                    pass
+        return {
+            "job_id": job_id,
+            "status": "cancelling",
+            "phase": job.phase,
+        }
+
+    def _register_cancel_handle(self, job_id: str, handle: Any) -> None:
+        """Register an I/O handle that can be closed to abort a download."""
+        with self.lock:
+            if job_id in self._cancel_events and self._cancel_events[job_id].is_set():
+                # Already cancelled before registration; close immediately.
+                try:
+                    handle.close()
+                except Exception:
+                    pass
+                return
+            self._cancel_handles[job_id] = handle
+
+    def _is_cancelled(self, job_id: str) -> bool:
+        event = self._cancel_events.get(job_id)
+        return event is not None and event.is_set()
+
+    def _cleanup_cancel_state(self, job_id: str) -> None:
+        """Remove cancellation event/handle for a finished job to avoid leaks."""
+        self._cancel_events.pop(job_id, None)
+        self._cancel_handles.pop(job_id, None)
+
+    def _kind_lock_and_semaphore(
+        self, job: RuntimeDependencyJob
+    ) -> tuple[str, tuple[str, str], threading.Semaphore]:
+        """Return (kind, runtime_lock_key, kind_semaphore) for a job.
+
+        Reference-data downloads (Layer C) use a per-sha256 lock and the
+        download semaphore; package installs keep the per-runtime lock and
+        install semaphore.
+        """
+        payload = job.payload if isinstance(job.payload, dict) else {}
+        task_type = str(job.task_type or "runtime_dependency_install")
+        source = payload.get("source") if isinstance(payload.get("source"), dict) else {}
+        spec = source.get("spec") if isinstance(source, dict) else None
+        if task_type == "reference_data_download" and isinstance(spec, dict) and spec.get("sha256"):
+            sha256 = str(spec["sha256"]).strip()
+            return "reference", (job.project_id, f"ref:{sha256}"), self._download_semaphore
+        runtime = str(payload.get("runtime") or "").strip()
+        return "install", (job.project_id, runtime), self._install_semaphore
+
     def _run(self, job_id: str, handler) -> None:
         with self.lock:
             job = self.jobs[job_id]
@@ -184,16 +277,25 @@ class RuntimeDependencyJobService:
             )
             self._persist_project_jobs_locked(job.project_id)
             self._emit_project_event(job)
-            runtime = str(job.payload.get("runtime") or "").strip()
-            runtime_key = (job.project_id, runtime)
-            runtime_lock = self.runtime_locks.setdefault(runtime_key, threading.Lock())
+            kind, lock_key, semaphore = self._kind_lock_and_semaphore(job)
+            runtime_lock = self.runtime_locks.setdefault(lock_key, threading.Lock())
+            # C2: reuse an event created by a racing cancel() call so the
+            # cancellation flag is not silently discarded.
+            cancel_event = self._cancel_events.setdefault(job_id, threading.Event())
         try:
             with runtime_lock:
-                with self.lock:
-                    job.phase = "building_command"
-                    job.last_heartbeat_at = utc_now()
-                    self._persist_project_jobs_locked(job.project_id)
-                result = handler(job.project_id, job.payload, phase_callback=self._make_phase_callback(job_id))
+                with semaphore:
+                    with self.lock:
+                        job.phase = "building_command"
+                        job.last_heartbeat_at = utc_now()
+                        self._persist_project_jobs_locked(job.project_id)
+                    result = handler(
+                        job.project_id,
+                        job.payload,
+                        phase_callback=self._make_phase_callback(job_id),
+                        job_id=job.job_id,
+                        cancel_event=cancel_event,
+                    )
         except Exception as exc:
             logger.exception("Runtime dependency job failed: %s", job_id)
             with self.lock:
@@ -226,10 +328,12 @@ class RuntimeDependencyJobService:
                         job.project_id,
                         job.job_id,
                     )
+            self._cleanup_cancel_state(job_id)
             if persisted:
                 self._publish_terminal_chat_receipt(job)
             return
         with self.lock:
+            self._cleanup_cancel_state(job_id)
             ok = bool(result.get("ok"))
             job.status = "succeeded" if ok else "failed"
             job.phase = "succeeded" if ok else "failed"
@@ -353,8 +457,24 @@ class RuntimeDependencyJobService:
             )
         self._notify_background_terminal(job.project_id, job_id=job.job_id)
 
+    def bump_heartbeat(self, job_id: str) -> None:
+        """Best-effort heartbeat bump for stalled read loops.
+
+        Called by long-running handlers (e.g. the Popen line loop in
+        ``manager_blueprint_tools``) when no output has arrived for several
+        seconds. Persists ``last_heartbeat_at`` and emits an event so the
+        frontend can tell the job is still alive.
+        """
+        with self.lock:
+            job = self.jobs.get(job_id)
+            if job is None:
+                return
+            job.last_heartbeat_at = utc_now()
+            self._persist_project_jobs_locked(job.project_id)
+            self._emit_project_event(job)
+
     def _make_phase_callback(self, job_id: str):
-        """Return a callback that updates phase and heartbeat for a running job."""
+        """Return a callback that updates phase, progress, and heartbeat for a running job."""
         def callback(phase: str, **kwargs: Any) -> None:
             with self.lock:
                 job = self.jobs.get(job_id)
@@ -368,6 +488,22 @@ class RuntimeDependencyJobService:
                     job.command_preview = kwargs["command_preview"]
                 if "log_path" in kwargs:
                     job.log_path = kwargs["log_path"]
+                if "progress" in kwargs and kwargs["progress"] is not None:
+                    job.progress = max(0, min(100, int(kwargs["progress"])))
+                if "progress_label" in kwargs:
+                    job.progress_label = kwargs["progress_label"]
+                if "bytes_total" in kwargs:
+                    job.bytes_total = kwargs["bytes_total"]
+                if "bytes_downloaded" in kwargs:
+                    job.bytes_downloaded = kwargs["bytes_downloaded"]
+                if "download_rate_bps" in kwargs:
+                    job.download_rate_bps = kwargs["download_rate_bps"]
+                if "stdout_tail" in kwargs:
+                    job.stdout_tail = str(kwargs["stdout_tail"])
+                    job.last_stdout_at = utc_now()
+                if "stderr_tail" in kwargs:
+                    job.stderr_tail = str(kwargs["stderr_tail"])
+                    job.last_stderr_at = utc_now()
                 self.background_task_service.update_task(
                     job.project_id,
                     job.task_id,
@@ -431,6 +567,21 @@ class RuntimeDependencyJobService:
                     job.project_id,
                     job.job_id,
                 )
+        # Layer F2: forward progress fields on mid-run events, not just terminal.
+        # Terminal failure details already include stdout/stderr tails; for active
+        # jobs we forward them directly so the live-log line is available.
+        for key in (
+            "progress",
+            "progress_label",
+            "bytes_total",
+            "bytes_downloaded",
+            "download_rate_bps",
+            "stdout_tail",
+            "stderr_tail",
+        ):
+            value = getattr(job, key)
+            if value is not None:
+                payload[key] = value
         # Include resolution status so consumers can distinguish manually resolved jobs.
         resolution_status = job.payload.get("resolution_status") if isinstance(job.payload, dict) else None
         if resolution_status:
@@ -490,6 +641,11 @@ class RuntimeDependencyJobService:
                     last_stderr_at=str(item["last_stderr_at"]) if item.get("last_stderr_at") is not None else None,
                     stdout_tail=str(item.get("stdout_tail") or ""),
                     stderr_tail=str(item.get("stderr_tail") or ""),
+                    progress=int(item["progress"]) if isinstance(item.get("progress"), int) else 0,
+                    progress_label=str(item["progress_label"]) if item.get("progress_label") is not None else None,
+                    bytes_total=int(item["bytes_total"]) if isinstance(item.get("bytes_total"), int) else None,
+                    bytes_downloaded=int(item["bytes_downloaded"]) if isinstance(item.get("bytes_downloaded"), int) else None,
+                    download_rate_bps=int(item["download_rate_bps"]) if isinstance(item.get("download_rate_bps"), int) else None,
                     result=dict(item["result"]) if isinstance(item.get("result"), dict) else None,
                     error=str(item["error"]) if item.get("error") is not None else None,
                     created_at=str(item.get("created_at") or now),
@@ -591,6 +747,11 @@ class RuntimeDependencyJobService:
                     "last_stderr_at": job.last_stderr_at,
                     "stdout_tail": job.stdout_tail,
                     "stderr_tail": job.stderr_tail,
+                    "progress": job.progress,
+                    "progress_label": job.progress_label,
+                    "bytes_total": job.bytes_total,
+                    "bytes_downloaded": job.bytes_downloaded,
+                    "download_rate_bps": job.download_rate_bps,
                     "resolution_status": job.payload.get("resolution_status"),
                     "resolved_at": job.payload.get("resolved_at"),
                     "resolved_by_session_id": job.payload.get("resolved_by_session_id"),

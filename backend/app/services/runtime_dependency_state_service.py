@@ -90,11 +90,17 @@ def compute_dedupe_key(
     *,
     error_code: str | None = None,
     requested_package: str | None = None,
+    source_sha256: str | None = None,
 ) -> str:
     """Compute a stable dedupe key for runtime dependency jobs.
 
-    Format: dep:{ecosystem}:{runtime}:{sorted_normalized_packages}:{error_code}:{requested_package}
+    Format for package jobs:
+      dep:{ecosystem}:{runtime}:{sorted_normalized_packages}:{error_code}:{requested_package}
+    Format for reference-data download jobs (Layer C):
+      ref:{source_sha256}:{error_code}:{requested_package}
     """
+    if source_sha256:
+        return f"ref:{source_sha256}:{error_code or ''}:{requested_package or ''}"
     normalized = _normalize_packages_for_key(packages, ecosystem)
     pkg_str = ",".join(sorted(normalized))
     return f"dep:{ecosystem}:{runtime}:{pkg_str}:{error_code or ''}:{requested_package or ''}"
@@ -166,12 +172,14 @@ def runtime_dependency_failure_details(job: Mapping[str, Any] | Any) -> dict[str
     )
 
     retry_hint = _retry_hint_for_error_code(error_code)
+    source_sha256 = _reference_source_sha256(payload)
     dedupe_key = compute_dedupe_key(
         ecosystem or "unknown",
         runtime or "unknown",
         packages,
         error_code=error_code,
         requested_package=requested_package,
+        source_sha256=source_sha256,
     )
 
     created_at = str(getter("created_at") or "").strip() or None
@@ -316,17 +324,51 @@ def _request_key_from_payload(payload: dict[str, Any]) -> tuple[str, str, list[s
     return (ecosystem, runtime, list(packages))
 
 
+def _reference_source_sha256(payload: dict[str, Any]) -> str | None:
+    """Extract the source sha256 from a reference-download job payload."""
+    if not isinstance(payload, dict):
+        return None
+    source = payload.get("source")
+    if not isinstance(source, dict):
+        return None
+    spec = source.get("spec")
+    if not isinstance(spec, dict):
+        return None
+    sha256 = str(spec.get("sha256") or "").strip()
+    return sha256 or None
+
+
 def find_duplicate_in_flight(
     project_root: Path,
     ecosystem: str,
     runtime: str,
     packages: list[str],
+    *,
+    source_sha256: str | None = None,
 ) -> dict[str, Any] | None:
-    """Return a matching in-flight job for the same ecosystem/runtime/packages.
+    """Return a matching in-flight job.
 
+    For package jobs, matches ecosystem/runtime/packages.
+    For reference-data download jobs (Layer C), matches source.sha256.
     Looks at persisted jobs (not just in-memory state) so backend restart does
     not reset deduplication.
     """
+    if source_sha256:
+        for item in load_runtime_dependency_jobs(project_root):
+            status = str(item.get("status") or "").strip()
+            if status not in ACTIVE_RUNTIME_DEPENDENCY_JOB_STATUSES:
+                continue
+            payload = item.get("payload") if isinstance(item.get("payload"), dict) else {}
+            item_sha256 = _reference_source_sha256(payload)
+            if item_sha256 == source_sha256:
+                return {
+                    "prior_job_id": str(item.get("job_id") or ""),
+                    "prior_status": status,
+                    "prior_phase": str(item.get("phase") or status).strip(),
+                    "prior_created_at": str(item.get("created_at") or ""),
+                }
+        return None
+
     expected = _normalize_packages_for_key(packages, ecosystem)
     for item in load_runtime_dependency_jobs(project_root):
         status = str(item.get("status") or "").strip()
@@ -355,12 +397,54 @@ def find_duplicate_terminal_failure(
     ecosystem: str,
     runtime: str,
     packages: list[str],
+    *,
+    source_sha256: str | None = None,
 ) -> dict[str, Any] | None:
     """Return a matching terminal failed job that should not be retried.
 
-    Only matches jobs with deterministic non-retryable error codes.
-    Does NOT cool timeout, interrupted, or generic failures.
+    For package jobs, matches ecosystem/runtime/packages and only cools
+    deterministic non-retryable error codes.
+    For reference-data download jobs (Layer C), matches source.sha256.
+    Cancelled jobs are always retryable and are never cooled.
     """
+    if source_sha256:
+        for item in load_runtime_dependency_jobs(project_root):
+            status = str(item.get("status") or "").strip()
+            if status not in {"failed", "succeeded"}:
+                continue
+            payload = item.get("payload") if isinstance(item.get("payload"), dict) else {}
+            item_sha256 = _reference_source_sha256(payload)
+            if item_sha256 != source_sha256:
+                continue
+            result = item.get("result") if isinstance(item.get("result"), dict) else {}
+            error_code = str(result.get("error_code") or "").strip() or None
+            if status == "succeeded":
+                return {
+                    "prior_job_id": str(item.get("job_id") or ""),
+                    "prior_status": "succeeded",
+                    "prior_created_at": str(item.get("created_at") or ""),
+                }
+            # Cancellations are retryable; do not cool.
+            if status == "failed" and error_code == "cancelled":
+                return None
+            # Cool reference failures with non-retryable error codes only.
+            if status == "failed" and error_code in NON_RETRYABLE_ERROR_CODES:
+                dedupe_key = compute_dedupe_key(
+                    ecosystem,
+                    runtime,
+                    packages,
+                    error_code=error_code,
+                    source_sha256=source_sha256,
+                )
+                return {
+                    "prior_job_id": str(item.get("job_id") or ""),
+                    "prior_status": "failed",
+                    "prior_error_code": error_code,
+                    "prior_created_at": str(item.get("created_at") or ""),
+                    "dedupe_key": dedupe_key,
+                }
+        return None
+
     expected = _normalize_packages_for_key(packages, ecosystem)
     for item in load_runtime_dependency_jobs(project_root):
         status = str(item.get("status") or "").strip()

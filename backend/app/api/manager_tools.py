@@ -684,6 +684,26 @@ def get_runtime_dependency_install_status(
         raise HTTPException(status_code=422, detail=str(exc)) from exc
 
 
+@router.post("/runtime-dependencies/jobs/{job_id}/cancel")
+def cancel_runtime_dependency_job(
+    project_id: str,
+    job_id: str,
+    authorization: str | None = Header(default=None),
+    manager_service: ManagerService = Depends(get_manager_service),
+) -> dict:
+    _verify_internal_token(authorization)
+    if manager_service.blueprint_tools.runtime_dependency_job_service is None:
+        raise HTTPException(status_code=503, detail="Runtime dependency job service is unavailable.")
+    try:
+        return manager_service.blueprint_tools.runtime_dependency_job_service.cancel(project_id, job_id)
+    except HTTPException:
+        raise
+    except ManagerPlanningError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=f"Failed to cancel job: {exc}") from exc
+
+
 @router.post("/background-workboard/promote")
 def promote_workboard_item_to_todo(
     project_id: str,

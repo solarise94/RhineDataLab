@@ -6,13 +6,18 @@ import os
 from hashlib import sha256
 from pathlib import Path
 import re
+import queue
 import shutil
 import subprocess
+import threading
+import time
+from collections import deque
 from typing import Any, Literal
 
 from fastapi import HTTPException
 from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_validator
 
+from app.models.card_blueprint import ReferenceDataSourceSpec
 from app.models.card_templates import CardTemplate, TemplateBundle, TemplateBundleFile, TemplateIoBinding, TemplateSpec
 from app.models.cards import Card, CardAssetRef
 from app.models.executor import ExecutorContext, ExecutorReference, ExecutorScriptAssetBinding
@@ -30,6 +35,7 @@ from app.services.module_group_state_service import ModuleGroupStateService
 from app.services.mounted_data_directory_service import MountedDataDirectoryService
 from app.services.package_service import PackageService
 from app.services.project_service import ProjectService
+from app.services.reference_data_service import ReferenceDataService
 from app.services.result_asset_service import ResultAssetService
 from app.services.runtime_dependency_job_service import RuntimeDependencyJobService
 from app.core.config import find_conda_solver
@@ -1493,7 +1499,7 @@ class ManagerBlueprintTools:
             "created_at": job.created_at,
         }
 
-    def _create_runtime_sync(self, project_id: str, payload: dict, phase_callback=None) -> dict:
+    def _create_runtime_sync(self, project_id: str, payload: dict, phase_callback=None, **kwargs) -> dict:
         env_name = payload["env_name"]
         env_path = Path(payload["env_path"])
         command = list(payload["command"])
@@ -1542,10 +1548,18 @@ class ManagerBlueprintTools:
 
         Returns the resolver plan without creating a background job. Manager
         may call this to ask "what would happen if I tried this request?"
-        before deciding to install.
+        before deciding to install.  Layer C: also handles reference-data
+        download payloads.
         """
         if self.runtime_dependency_resolver_service is None:
             raise ManagerPlanningError("runtime dependency resolver service is unavailable.")
+
+        # Layer C: reference-data download plan.
+        source_container = payload.get("source") if isinstance(payload.get("source"), dict) else {}
+        source_spec = source_container.get("spec") if isinstance(source_container, dict) else None
+        if isinstance(source_spec, dict) and source_spec.get("sha256"):
+            return self._resolve_reference_download_plan(project_id, payload, session_id=session_id)
+
         try:
             request_payload = self._validated_runtime_dependency_payload(project_id, payload, session_id=session_id)
         except DependencyResolutionError as exc:
@@ -1620,6 +1634,41 @@ class ManagerBlueprintTools:
                 if is_registry_fallback_action_safe(action)
             ]
         return plan_dict
+
+    def _resolve_reference_download_plan(self, project_id: str, payload: dict, session_id: str | None = None) -> dict:
+        """Plan-only path for reference-data downloads (Layer C)."""
+        source_container = payload.get("source") if isinstance(payload.get("source"), dict) else {}
+        source_spec = source_container.get("spec") if isinstance(source_container, dict) else None
+        sha256 = str(source_spec.get("sha256") or "").strip() if isinstance(source_spec, dict) else ""
+        project_path = self.project_service.project_path(project_id)
+
+        in_flight = find_duplicate_in_flight(
+            project_path, "", "", [], source_sha256=sha256
+        ) if sha256 else None
+        terminal = find_duplicate_terminal_failure(
+            project_path, "", "", [], source_sha256=sha256
+        ) if sha256 else None
+
+        plan = self.runtime_dependency_resolver_service.resolve_reference_download(
+            project_id,
+            payload,
+            settings=self.project_service.settings,
+        )
+        if in_flight is not None:
+            plan["in_flight_duplicate"] = {
+                "prior_job_id": in_flight["prior_job_id"],
+                "error_code": "duplicate_dependency_resolution_in_progress",
+                "retry_hint": "wait_for_existing_dependency_job",
+            }
+        if terminal is not None and terminal.get("prior_status") == "failed":
+            plan["terminal_duplicate"] = {
+                "prior_job_id": terminal["prior_job_id"],
+                "prior_error_code": terminal.get("prior_error_code"),
+                "error_code": "duplicate_dependency_resolution_failure",
+                "dedupe_key": terminal.get("dedupe_key"),
+                "retry_hint": "do_not_retry_same_request; retry is allowed for cancellations",
+            }
+        return plan
 
     @staticmethod
     def _status_for_error_code(error_code: str | None) -> str:
@@ -1755,7 +1804,7 @@ class ManagerBlueprintTools:
             )
         return payload
 
-    def _install_runtime_dependencies_sync(self, project_id: str, payload: dict, phase_callback=None) -> dict:
+    def _install_runtime_dependencies_sync(self, project_id: str, payload: dict, phase_callback=None, **kwargs) -> dict:
         request = InstallRuntimeDependenciesPayload.model_validate(payload)
         ecosystem = self._normalize_dependency_ecosystem(request.ecosystem)
         packages = self._validate_dependency_packages(ecosystem, request.packages)
@@ -1764,6 +1813,8 @@ class ManagerBlueprintTools:
             raise ManagerPlanningError("install_runtime_dependencies requires a selected non-system runtime.")
         timeout = max(30, min(int(request.timeout_seconds or 600), 1800))
         started_at = utc_now()
+        job_id = kwargs.get("job_id")
+        cancel_event = kwargs.get("cancel_event")
 
         # P1.3: if the resolver attached an installer_plan from the approved
         # action set, dispatch directly on those structured actions. The
@@ -1784,6 +1835,8 @@ class ManagerBlueprintTools:
                 started_at=started_at,
                 channels=channels,
                 phase_callback=phase_callback,
+                job_id=job_id,
+                cancel_event=cancel_event,
             )
 
         # Legacy path (no resolver, or resolver not available): fall through
@@ -1819,6 +1872,8 @@ class ManagerBlueprintTools:
             timeout=timeout,
             started_at=started_at,
             phase_callback=phase_callback,
+            job_id=job_id,
+            cancel_event=cancel_event,
         )
 
     def _install_from_plan(
@@ -1833,6 +1888,8 @@ class ManagerBlueprintTools:
         started_at: str,
         channels: list[str] | None = None,
         phase_callback=None,
+        job_id: str | None = None,
+        cancel_event: threading.Event | None = None,
     ) -> dict:
         """Execute a resolver-approved installer_plan.
 
@@ -1906,6 +1963,8 @@ class ManagerBlueprintTools:
                 timeout=timeout,
                 started_at=started_at,
                 phase_callback=phase_callback,
+                job_id=job_id,
+                cancel_event=cancel_event,
             )
 
         if installer_type == "pip":
@@ -1917,6 +1976,8 @@ class ManagerBlueprintTools:
                 timeout=timeout,
                 started_at=started_at,
                 phase_callback=phase_callback,
+                job_id=job_id,
+                cancel_event=cancel_event,
             )
 
         if installer_type in {"cran", "bioconductor"}:
@@ -1929,6 +1990,8 @@ class ManagerBlueprintTools:
                 timeout=timeout,
                 started_at=started_at,
                 phase_callback=phase_callback,
+                job_id=job_id,
+                cancel_event=cancel_event,
             )
 
         return {
@@ -1957,14 +2020,14 @@ class ManagerBlueprintTools:
         started_at: str,
         phase_callback=None,
         extra_env: dict[str, str] | None = None,
+        job_id: str | None = None,
+        cancel_event: threading.Event | None = None,
     ) -> dict:
         """Run a single subprocess command for dependency installation.
 
-        If ``phase_callback`` is provided, it is called with ``(phase, **kwargs)``
-        at ``launching_subprocess`` (before the call) and ``running_subprocess``
-        (immediately before the blocking ``subprocess.run()``).  No ``child_pid``
-        is provided yet because we still use ``subprocess.run()``; real child-pid
-        tracking requires switching to ``Popen`` (future P1 work).
+        Layer F2: uses ``Popen`` + a line-reading loop so stdout/stderr tails,
+        progress tokens, and download rates are available live. All installers
+        (conda, pip, CRAN, Bioconductor) flow through here.
         """
         run_env = self._dependency_subprocess_env(ecosystem, manager_name, resolved_runtime) if ecosystem == "R" and manager_name != "conda" else None
         if extra_env is not None:
@@ -1973,32 +2036,16 @@ class ManagerBlueprintTools:
             run_env = merged
         if phase_callback:
             phase_callback("launching_subprocess", command_preview=command)
-            phase_callback("running_subprocess", command_preview=command)
         try:
-            result = subprocess.run(
+            proc = subprocess.Popen(
                 command,
                 cwd=self.project_service.project_path(project_id),
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
                 text=True,
-                capture_output=True,
-                timeout=timeout,
-                check=False,
+                bufsize=1,
                 env=run_env,
             )
-        except subprocess.TimeoutExpired as exc:
-            return {
-                "ok": False,
-                "error_code": "dependency_install_timeout",
-                "ecosystem": ecosystem,
-                "runtime": runtime,
-                "resolved_runtime": resolved_runtime,
-                "packages": packages,
-                "manager": manager_name,
-                "message": f"Dependency installation timed out after {timeout} seconds.",
-                "stdout_tail": self._tail_text(exc.stdout),
-                "stderr_tail": self._tail_text(exc.stderr),
-                "started_at": started_at,
-                "finished_at": utc_now(),
-            }
         except OSError as exc:
             return {
                 "ok": False,
@@ -2014,7 +2061,147 @@ class ManagerBlueprintTools:
                 "started_at": started_at,
                 "finished_at": utc_now(),
             }
-        ok = result.returncode == 0
+
+        progress_state: dict[str, Any] = {
+            "progress": 0,
+            "progress_label": None,
+            "bytes_total": None,
+            "bytes_downloaded": None,
+            "download_rate_bps": None,
+        }
+        stdout_deque: deque[str] = deque(maxlen=200)
+        stderr_deque: deque[str] = deque(maxlen=200)
+        line_queue: queue.Queue[tuple[str, str | None]] = queue.Queue()
+
+        def _reader(stream, kind: str) -> None:
+            try:
+                for line in stream:
+                    line_queue.put((kind, line))
+            finally:
+                line_queue.put((kind, None))
+
+        t_out = threading.Thread(target=_reader, args=(proc.stdout, "stdout"), daemon=True)
+        t_err = threading.Thread(target=_reader, args=(proc.stderr, "stderr"), daemon=True)
+        t_out.start()
+        t_err.start()
+
+        active_readers = 2
+        start_time = time.monotonic()
+        last_callback_time = 0.0
+        last_heartbeat_time = start_time
+        last_line_time = start_time
+        last_progress_emitted = -1
+        callback_interval = 0.5
+        heartbeat_interval = 10.0
+        timed_out = False
+        cancelled = False
+
+        try:
+            while active_readers > 0 or proc.poll() is None:
+                now = time.monotonic()
+                if now - start_time > timeout:
+                    timed_out = True
+                    try:
+                        proc.kill()
+                    except Exception:
+                        pass
+                    break
+                if (
+                    cancel_event is not None
+                    and cancel_event.is_set()
+                ):
+                    cancelled = True
+                    try:
+                        proc.kill()
+                    except Exception:
+                        pass
+                    break
+                if (
+                    now - last_line_time > heartbeat_interval
+                    and now - last_heartbeat_time > heartbeat_interval
+                ):
+                    if job_id is not None and self.runtime_dependency_job_service is not None:
+                        self.runtime_dependency_job_service.bump_heartbeat(job_id)
+                    last_heartbeat_time = now
+                try:
+                    kind, line = line_queue.get(timeout=0.1)
+                except queue.Empty:
+                    continue
+                if line is None:
+                    active_readers -= 1
+                    continue
+                last_line_time = now
+                if kind == "stdout":
+                    stdout_deque.append(line)
+                else:
+                    stderr_deque.append(line)
+                self._update_progress_from_line(line, progress_state)
+                current_progress = progress_state["progress"] or 0
+                should_emit = False
+                if now - last_callback_time >= callback_interval:
+                    should_emit = True
+                elif current_progress != last_progress_emitted:
+                    should_emit = True
+                if should_emit and phase_callback:
+                    phase_callback(
+                        "running_subprocess",
+                        command_preview=command,
+                        child_pid=proc.pid,
+                        progress=current_progress,
+                        progress_label=progress_state.get("progress_label"),
+                        bytes_total=progress_state.get("bytes_total"),
+                        bytes_downloaded=progress_state.get("bytes_downloaded"),
+                        download_rate_bps=progress_state.get("download_rate_bps"),
+                        stdout_tail="".join(stdout_deque)[-6000:],
+                        stderr_tail="".join(stderr_deque)[-6000:],
+                    )
+                    last_callback_time = now
+                    last_progress_emitted = current_progress
+            if not timed_out and not cancelled:
+                remaining = max(0, timeout - (time.monotonic() - start_time))
+                proc.wait(timeout=remaining)
+        except subprocess.TimeoutExpired:
+            timed_out = True
+            try:
+                proc.kill()
+            except Exception:
+                pass
+
+        stdout_tail = "".join(stdout_deque)
+        stderr_tail = "".join(stderr_deque)
+        if cancelled:
+            return {
+                "ok": False,
+                "error_code": "cancelled",
+                "ecosystem": ecosystem,
+                "runtime": runtime,
+                "resolved_runtime": resolved_runtime,
+                "packages": packages,
+                "manager": manager_name,
+                "message": "Dependency installation was cancelled.",
+                "stdout_tail": self._tail_text(stdout_tail),
+                "stderr_tail": self._tail_text(stderr_tail),
+                "started_at": started_at,
+                "finished_at": utc_now(),
+            }
+        if timed_out:
+            return {
+                "ok": False,
+                "error_code": "dependency_install_timeout",
+                "ecosystem": ecosystem,
+                "runtime": runtime,
+                "resolved_runtime": resolved_runtime,
+                "packages": packages,
+                "manager": manager_name,
+                "message": f"Dependency installation timed out after {timeout} seconds.",
+                "stdout_tail": self._tail_text(stdout_tail),
+                "stderr_tail": self._tail_text(stderr_tail),
+                "started_at": started_at,
+                "finished_at": utc_now(),
+            }
+
+        returncode = proc.returncode if proc.poll() is not None else -1
+        ok = returncode == 0
         error_code = None
         if not ok:
             error_code = "dependency_install_failed"
@@ -2022,7 +2209,7 @@ class ManagerBlueprintTools:
         changed: bool | None = None
         message = "Dependency installation failed."
         if ok:
-            if self._is_conda_noop(result.stdout):
+            if self._is_conda_noop(stdout_tail):
                 status_detail = "already_satisfied"
                 changed = False
                 message = "Dependencies already satisfied."
@@ -2040,12 +2227,201 @@ class ManagerBlueprintTools:
             "resolved_runtime": resolved_runtime,
             "packages": packages,
             "manager": manager_name,
-            "returncode": result.returncode,
+            "returncode": returncode,
             "message": message,
-            "stdout_tail": self._tail_text(result.stdout),
-            "stderr_tail": self._tail_text(result.stderr),
+            "stdout_tail": self._tail_text(stdout_tail),
+            "stderr_tail": self._tail_text(stderr_tail),
             "started_at": started_at,
             "finished_at": utc_now(),
+        }
+
+    _PROGRESS_UNIT_FACTOR: dict[str, int] = {
+        "B": 1,
+        "kB": 1024,
+        "MB": 1024 * 1024,
+        "GB": 1024 * 1024 * 1024,
+        "TB": 1024 * 1024 * 1024 * 1024,
+    }
+
+    def _update_progress_from_line(self, line: str, state: dict[str, Any]) -> None:
+        """Update shared progress state from one stdout/stderr line.
+
+        Handles pip ``Downloading X (NN%) ... kB/s``, conda/mamba transaction
+        percentages, and R download progress lines. Values are intentionally
+        conservative: if a line does not contain a recognizable token, the
+        previous state is retained.
+        """
+        stripped = line.strip()
+        if not stripped:
+            return
+
+        # Download label: pip/conda/mamba all emit "Downloading <name>".
+        m = re.search(r"Downloading\s+(\S+)", stripped, re.IGNORECASE)
+        if m:
+            state["progress_label"] = stripped[:120]
+
+        # Byte fraction: "16.0/16.0 MB" (pip progress bars).
+        frac = re.search(
+            r"(\d+(?:\.\d+)?)\s*/\s*(\d+(?:\.\d+)?)\s*(B|kB|MB|GB|TB)",
+            stripped,
+            re.IGNORECASE,
+        )
+        if frac:
+            downloaded, total, unit = frac.groups()
+            factor = self._PROGRESS_UNIT_FACTOR.get(unit, 1)
+            state["bytes_downloaded"] = int(float(downloaded) * factor)
+            state["bytes_total"] = int(float(total) * factor)
+            if state["bytes_total"]:
+                state["progress"] = int(
+                    state["bytes_downloaded"] / state["bytes_total"] * 100
+                )
+
+        # Plain percent token: "45%" (conda/mamba transaction progress).
+        pct = re.search(r"(\d+)%", stripped)
+        if pct:
+            state["progress"] = int(pct.group(1))
+
+        # Transfer rate: "5.2 MB/s".
+        rate = re.search(
+            r"(\d+(?:\.\d+)?)\s*(B|kB|MB|GB|TB)/s",
+            stripped,
+            re.IGNORECASE,
+        )
+        if rate:
+            factor = self._PROGRESS_UNIT_FACTOR.get(rate.group(2), 1)
+            state["download_rate_bps"] = int(float(rate.group(1)) * factor)
+
+    def _download_reference_asset_sync(
+        self,
+        project_id: str,
+        payload: dict,
+        phase_callback=None,
+        *,
+        job_id: str | None = None,
+        cancel_event: Any | None = None,
+    ) -> dict:
+        """Reference-data download handler for the dependency job service (Layer C).
+
+        Streams the file through ``ReferenceDataService.fetch_and_register``,
+        verifies sha256, and returns the registered ref metadata.  Runs as a
+        dependency job so it shares locking, dedup, persistence, and SSE with
+        package installs.
+        """
+        source_container = payload.get("source") if isinstance(payload.get("source"), dict) else {}
+        source_spec = source_container.get("spec") if isinstance(source_container, dict) else None
+        if not isinstance(source_spec, dict) or not source_spec.get("sha256"):
+            return {
+                "ok": False,
+                "error_code": "invalid_reference_payload",
+                "message": "Reference download payload is missing a valid source spec.",
+            }
+        source = ReferenceDataSourceSpec(**source_spec)
+        phase_callback = phase_callback or (lambda *_args, **_kwargs: None)
+        phase_callback("launching_subprocess", command_preview=["fetch", source.url])
+
+        service = ReferenceDataService(self.project_service.settings)
+        try:
+            def _register_handle(handle: Any) -> None:
+                if job_id is not None and self.runtime_dependency_job_service is not None:
+                    self.runtime_dependency_job_service._register_cancel_handle(job_id, handle)
+
+            # Layer F2: throttle live reference-download progress updates to
+            # ~0.5 s or on integer-percent changes.
+            last_emit_at = [0.0]
+            last_emitted_progress = [-1]
+
+            def _progress_callback(info: dict[str, Any]) -> None:
+                now = time.monotonic()
+                progress = int(info.get("progress") or 0)
+                if (
+                    now - last_emit_at[0] < 0.5
+                    and progress == last_emitted_progress[0]
+                ):
+                    return
+                last_emit_at[0] = now
+                last_emitted_progress[0] = progress
+                phase_callback(
+                    "running_subprocess",
+                    command_preview=["fetch", source.url],
+                    progress=progress,
+                    progress_label=info.get("progress_label"),
+                    bytes_total=info.get("bytes_total"),
+                    bytes_downloaded=info.get("bytes_downloaded"),
+                    download_rate_bps=info.get("download_rate_bps"),
+                )
+
+            meta = service.fetch_and_register(
+                source,
+                cancel_event=cancel_event,
+                register_handle=_register_handle,
+                progress_callback=_progress_callback,
+            )
+        except Exception as exc:
+            is_cancelled = (
+                cancel_event is not None and cancel_event.is_set()
+            ) or "cancelled" in str(exc).lower()
+            return {
+                "ok": False,
+                "error_code": "cancelled" if is_cancelled else "reference_download_failed",
+                "message": f"Reference download {'cancelled' if is_cancelled else 'failed'}: {exc}",
+            }
+
+        # Update the source card's executor_context so the downloaded reference
+        # is visible to executor runs and the blocker releases as soon as the
+        # job succeeds. This must happen before returning so the job service
+        # marks the job terminal only after the card is persisted.
+        card_id = source_container.get("card_id") if isinstance(source_container, dict) else None
+        role = payload.get("role")
+        if card_id and role:
+            try:
+                downloaded_path = service.resolve(meta.ref_id)
+                with self.project_service.lock_for(project_id):
+                    store = self.project_service.graph_store(project_id)
+                    cards = store.load_cards()
+                    card = next((c for c in cards if c.card_id == card_id), None)
+                    if card is not None:
+                        context = card.executor_context.model_copy(deep=True) if card.executor_context else ExecutorContext()
+                        template_metadata = dict(context.template_metadata or {})
+                        reference_paths = dict(template_metadata.get("reference_paths") or {})
+                        role_paths = list(reference_paths.get(role) or [])
+                        path_str = str(downloaded_path)
+                        if path_str not in role_paths:
+                            role_paths.append(path_str)
+                        reference_paths[role] = role_paths
+                        template_metadata["reference_paths"] = reference_paths
+                        context.template_metadata = template_metadata
+
+                        references = list(context.references or [])
+                        if not any(
+                            r.type == "file" and r.description == role and r.path == path_str
+                            for r in references
+                        ):
+                            references.append(ExecutorReference(type="file", path=path_str, description=role))
+                        context.references = references
+
+                        card.executor_context = context
+                        store.save_cards(cards)
+            except Exception as exc:
+                logger.warning(
+                    "Reference download succeeded but failed to update card executor_context: %s",
+                    exc,
+                )
+
+        phase_callback(
+            "running_subprocess",
+            command_preview=["verify", source.sha256],
+            progress=100,
+            progress_label=f"Verifying {source.url}",
+            bytes_total=meta.size,
+            bytes_downloaded=meta.size,
+            download_rate_bps=0,
+        )
+        return {
+            "ok": True,
+            "ref_id": meta.ref_id,
+            "sha256": meta.sha256,
+            "kind": meta.kind,
+            "size": meta.size,
         }
 
     def _run_pip_install(
@@ -2058,6 +2434,8 @@ class ManagerBlueprintTools:
         timeout: int,
         started_at: str,
         phase_callback=None,
+        job_id: str | None = None,
+        cancel_event: threading.Event | None = None,
     ) -> dict:
         """Structured pip install — no Manager-built text."""
         from app.workers.command_worker import CommandTemplateWorkerAdapter
@@ -2126,6 +2504,8 @@ class ManagerBlueprintTools:
             timeout=timeout,
             started_at=started_at,
             phase_callback=phase_callback,
+            job_id=job_id,
+            cancel_event=cancel_event,
         )
 
     def _run_r_registry_install(
@@ -2139,6 +2519,8 @@ class ManagerBlueprintTools:
         timeout: int,
         started_at: str,
         phase_callback=None,
+        job_id: str | None = None,
+        cancel_event: threading.Event | None = None,
     ) -> dict:
         """Structured CRAN / Bioconductor install via Rscript."""
         from app.workers.command_worker import CommandTemplateWorkerAdapter
@@ -2212,6 +2594,8 @@ class ManagerBlueprintTools:
             timeout=timeout,
             started_at=started_at,
             phase_callback=phase_callback,
+            job_id=job_id,
+            cancel_event=cancel_event,
         )
 
     def _validated_runtime_dependency_payload(self, project_id: str, payload: dict, *, session_id: str | None = None) -> dict[str, Any]:

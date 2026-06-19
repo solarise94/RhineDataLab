@@ -148,6 +148,20 @@ def get_runtime_dependency_job(
         details["log_path"] = job.log_path
     if job.last_heartbeat_at is not None:
         details["last_heartbeat_at"] = job.last_heartbeat_at
+    # Layer F2: live progress fields for the determinate progress bar.
+    details["progress"] = job.progress
+    if job.progress_label is not None:
+        details["progress_label"] = job.progress_label
+    if job.bytes_total is not None:
+        details["bytes_total"] = job.bytes_total
+    if job.bytes_downloaded is not None:
+        details["bytes_downloaded"] = job.bytes_downloaded
+    if job.download_rate_bps is not None:
+        details["download_rate_bps"] = job.download_rate_bps
+    if job.stdout_tail:
+        details["stdout_tail"] = job.stdout_tail
+    if job.stderr_tail:
+        details["stderr_tail"] = job.stderr_tail
     # Preserve raw payload/result/error for audit compatibility.
     return {
         **details,

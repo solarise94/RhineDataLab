@@ -132,6 +132,16 @@ class Settings(BaseSettings):
     cran_mirror: str = ""
     bioconductor_mirror: str = ""
     pypi_mirror: str = ""
+
+    # Egress proxy settings (Layer D). These are re-exported to os.environ at
+    # startup so that subprocess installers (conda/pip/R) and urllib-based
+    # downloads honor them automatically.
+    http_proxy: str = ""
+    https_proxy: str = ""
+    no_proxy: str = ""
+    reference_download_timeout_s: int = 1800
+    reference_download_retries: int = 2
+
     executor_host_root_readonly: bool = True
     executor_extra_ro_binds: str = Field(default_factory=lambda: f"{Path.home()}/.nvm,{Path.home()}/.local")
     opencode_command: str | None = None

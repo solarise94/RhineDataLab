@@ -131,6 +131,35 @@ class RuntimeDependencyStateServiceTest(unittest.TestCase):
         self.assertEqual(details["ok"], False)
         self.assertIn("dedupe_key", details)
 
+    def test_failure_details_reference_job_uses_ref_dedupe_key(self):
+        sha256 = "a" * 64
+        job = {
+            "job_id": "refjob_abc123",
+            "task_id": "bgtask_abc123",
+            "status": "failed",
+            "payload": {
+                "source": {
+                    "card_id": "card_1",
+                    "spec": {
+                        "sha256": sha256,
+                        "url": "http://example.com/data.txt",
+                    },
+                },
+                "role": "genome",
+            },
+            "result": {
+                "ok": False,
+                "error_code": "external_source_install_not_supported",
+                "message": "Download failed.",
+            },
+            "created_at": "2026-06-01T00:00:00Z",
+        }
+        details = runtime_dependency_failure_details(job)
+        self.assertEqual(details["job_id"], "refjob_abc123")
+        self.assertEqual(details["card_id"], "card_1")
+        self.assertEqual(details["error_code"], "external_source_install_not_supported")
+        self.assertEqual(details["dedupe_key"], f"ref:{sha256}:external_source_install_not_supported:")
+
     def test_failure_details_strips_none_values(self):
         job = {
             "job_id": "depjob_abc123",

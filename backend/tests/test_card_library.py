@@ -635,6 +635,81 @@ class TestInstantiationValidation(_Base):
 
 
 # ======================================================================
+# Reference-data download integration (Layer C)
+# ======================================================================
+
+class TestReferenceAssetsInstantiation(_Base):
+    def _setup_project_with_reference_blueprint(
+        self,
+        reference_assets: list[dict],
+        required_input: bool = False,
+    ):
+        ps = self._create_project("proj-ref")
+        svc = self._service(ps)
+        bp_data = {
+            "blueprint_id": "bp-ref-test",
+            "title": "Reference Test",
+            "summary": "Test reference assets",
+            "inputs_schema": [
+                {"slot": "data", "label": "Input Data", "required": required_input},
+            ],
+            "reference_assets": reference_assets,
+        }
+        result = svc.save_from_import(bp_data)
+        return svc, ps, result.blueprint_id
+
+    def test_required_reference_without_source_blocks(self):
+        """Missing required ref with no source still blocks instantiation."""
+        svc, _, bp_id = self._setup_project_with_reference_blueprint([
+            {"ref_id": "missing_ref", "role": "genome", "required": True},
+        ])
+        self._add_asset("proj-ref", "a1")
+        result = svc.instantiate(bp_id, "proj-ref", InstantiateRequest(
+            input_bindings={"data": "a1"},
+            parameter_values={},
+        ))
+        self.assertEqual(result.card_id, "")
+        self.assertTrue(any("missing_ref" in b for b in result.blockers))
+
+    def test_optional_reference_without_source_skips(self):
+        """Missing optional ref with no source is silently skipped."""
+        svc, _, bp_id = self._setup_project_with_reference_blueprint([
+            {"ref_id": "missing_ref", "role": "genome", "required": False},
+        ])
+        self._add_asset("proj-ref", "a1")
+        result = svc.instantiate(bp_id, "proj-ref", InstantiateRequest(
+            input_bindings={"data": "a1"},
+            parameter_values={},
+        ))
+        self.assertNotEqual(result.card_id, "")
+        self.assertEqual(result.blockers, [])
+
+    def test_source_only_reference_records_pending_download(self):
+        """Source-only ref records a pending download instead of blocking."""
+        svc, _, bp_id = self._setup_project_with_reference_blueprint([
+            {
+                "role": "genome",
+                "required": True,
+                "source": {
+                    "url": "http://example.com/genome.fa",
+                    "sha256": "0" * 64,
+                    "kind": "fasta",
+                },
+            },
+        ])
+        self._add_asset("proj-ref", "a1")
+        result = svc.instantiate(bp_id, "proj-ref", InstantiateRequest(
+            input_bindings={"data": "a1"},
+            parameter_values={},
+        ))
+        self.assertNotEqual(result.card_id, "")
+        self.assertEqual(result.blockers, [])
+        self.assertEqual(len(result.pending_reference_downloads), 1)
+        self.assertEqual(result.pending_reference_downloads[0]["role"], "genome")
+        self.assertEqual(result.pending_reference_downloads[0]["source"]["sha256"], "0" * 64)
+
+
+# ======================================================================
 # BlueprintOutputSchema.artifact_class validation (Finding #5)
 # ======================================================================
 

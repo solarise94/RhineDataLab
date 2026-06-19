@@ -1,11 +1,14 @@
-"""Tests for the reference-data registry (storage, dedup, path safety)."""
+"""Tests for the reference-data registry (storage, dedup, path safety, fetch)."""
 
 from __future__ import annotations
 
+import hashlib
+import http.server
 import io
 import os
 import shutil
 import tempfile
+import threading
 import unittest
 from pathlib import Path
 from unittest.mock import patch
@@ -14,6 +17,7 @@ from fastapi import HTTPException
 
 from app.api.reference_data import delete_reference_data, register_upload
 from app.core.config import Settings, get_settings
+from app.models.card_blueprint import ReferenceDataSourceSpec
 from app.services.reference_data_service import (
     ReferenceDataError,
     ReferenceDataService,
@@ -174,6 +178,254 @@ class TestPathSafety(_Base):
             svc.resolve("..%2f..%2fetc")
         with self.assertRaises(ReferenceDataError):
             svc.resolve("ref_../../etc")
+
+
+class _MockReferenceHandler(http.server.BaseHTTPRequestHandler):
+    """HTTP handler that serves per-path responses and records request counts."""
+
+    # Populated by the harness before each test: path -> (status, body)
+    routes: dict[str, tuple[int, bytes]] = {}
+    request_counts: dict[str, int] = {}
+
+    def do_GET(self):
+        _MockReferenceHandler.request_counts[self.path] = (
+            _MockReferenceHandler.request_counts.get(self.path, 0) + 1
+        )
+        status, body = _MockReferenceHandler.routes.get(self.path, (404, b"not found"))
+        self.send_response(status)
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+
+    def log_message(self, format, *args):
+        pass
+
+
+class _MockServer:
+    def __init__(self, routes: dict[str, tuple[int, bytes]]):
+        _MockReferenceHandler.routes = routes
+        _MockReferenceHandler.request_counts = {}
+        self.server = http.server.HTTPServer(("127.0.0.1", 0), _MockReferenceHandler)
+        self.port = self.server.server_address[1]
+        self.thread = threading.Thread(target=self.server.serve_forever, daemon=True)
+        self.thread.start()
+
+    @property
+    def base_url(self) -> str:
+        return f"http://127.0.0.1:{self.port}"
+
+    @property
+    def request_counts(self) -> dict[str, int]:
+        return _MockReferenceHandler.request_counts
+
+    def shutdown(self):
+        self.server.shutdown()
+        self.server.server_close()
+        self.thread.join(timeout=5)
+
+
+class TestFetchAndRegister(_Base):
+    def setUp(self):
+        super().setUp()
+        self.server: _MockServer | None = None
+
+    def tearDown(self):
+        if self.server is not None:
+            self.server.shutdown()
+        super().tearDown()
+
+    def _start_server(self, routes: dict[str, tuple[int, bytes]]) -> _MockServer:
+        self.server = _MockServer(routes)
+        return self.server
+
+    def _make_settings(self, retries: int = 2, timeout_s: int = 5) -> Settings:
+        return Settings(
+            data_root=self.data_root,
+            reference_download_retries=retries,
+            reference_download_timeout_s=timeout_s,
+        )
+
+    def test_fetch_and_register_downloads_and_verifies_sha256(self):
+        content = b"gencode.v44.annotation.gtf.gz content"
+        digest = hashlib.sha256(content).hexdigest()
+        server = self._start_server({"/ref.gtf": (200, content)})
+
+        svc = ReferenceDataService(settings=self._make_settings())
+        source = ReferenceDataSourceSpec(
+            url=f"{server.base_url}/ref.gtf",
+            sha256=digest,
+            kind="gtf",
+            filename="gencode.v44.annotation.gtf.gz",
+        )
+        meta = svc.fetch_and_register(source)
+
+        self.assertTrue(meta.ref_id.startswith("ref_"))
+        self.assertEqual(meta.kind, "gtf")
+        self.assertEqual(meta.sha256, digest)
+        self.assertEqual(meta.size, len(content))
+        self.assertEqual(meta.stored_filename, "gencode.v44.annotation.gtf.gz")
+        self.assertEqual(svc.resolve(meta.ref_id).read_bytes(), content)
+        self.assertEqual(server.request_counts.get("/ref.gtf"), 1)
+
+    def test_fetch_and_register_dedups_on_cache_hit(self):
+        content = b"shared reference content"
+        digest = hashlib.sha256(content).hexdigest()
+        server = self._start_server({"/ref.fa": (200, content)})
+
+        svc = ReferenceDataService(settings=self._make_settings())
+        source = ReferenceDataSourceSpec(
+            url=f"{server.base_url}/ref.fa",
+            sha256=digest,
+            kind="fasta",
+        )
+        meta1 = svc.fetch_and_register(source)
+        meta2 = svc.fetch_and_register(source)
+
+        self.assertEqual(meta1.ref_id, meta2.ref_id)
+        self.assertEqual(len(svc.list()), 1)
+        # Pre-check dedup: the second fetch sees the registered sha256 and skips
+        # network I/O entirely.
+        self.assertEqual(server.request_counts.get("/ref.fa"), 1)
+
+    def test_fetch_and_register_rejects_tampered_file(self):
+        content = b"good content"
+        digest = hashlib.sha256(content).hexdigest()
+        server = self._start_server({"/ref.gtf": (200, b"tampered content")})
+
+        svc = ReferenceDataService(settings=self._make_settings(retries=1))
+        source = ReferenceDataSourceSpec(
+            url=f"{server.base_url}/ref.gtf",
+            sha256=digest,
+            kind="gtf",
+        )
+        with self.assertRaises(ReferenceDataError) as ctx:
+            svc.fetch_and_register(source)
+
+        self.assertIn("sha256 mismatch", str(ctx.exception).lower())
+        # Only one request because mismatches do not retry within the same URL.
+        self.assertEqual(server.request_counts.get("/ref.gtf"), 1)
+
+    def test_fetch_and_register_retry_budget_transport_failure(self):
+        content = b"mirror content"
+        digest = hashlib.sha256(content).hexdigest()
+        server = self._start_server({
+            "/primary.gtf": (500, b"server error"),
+            "/mirror.gtf": (200, content),
+        })
+
+        svc = ReferenceDataService(settings=self._make_settings(retries=2))
+        source = ReferenceDataSourceSpec(
+            url=f"{server.base_url}/primary.gtf",
+            mirrors=[f"{server.base_url}/mirror.gtf"],
+            sha256=digest,
+            kind="gtf",
+        )
+        meta = svc.fetch_and_register(source)
+
+        self.assertEqual(meta.sha256, digest)
+        self.assertEqual(server.request_counts.get("/primary.gtf"), 1)
+        self.assertEqual(server.request_counts.get("/mirror.gtf"), 1)
+
+    def test_fetch_and_register_sha256_mismatch_does_not_consume_retry(self):
+        """With retries=1 a primary mismatch must still allow the mirror to be tried."""
+        content = b"mirror content"
+        digest = hashlib.sha256(content).hexdigest()
+        server = self._start_server({
+            "/primary.gtf": (200, b"bad content"),
+            "/mirror.gtf": (200, content),
+        })
+
+        svc = ReferenceDataService(settings=self._make_settings(retries=1))
+        source = ReferenceDataSourceSpec(
+            url=f"{server.base_url}/primary.gtf",
+            mirrors=[f"{server.base_url}/mirror.gtf"],
+            sha256=digest,
+            kind="gtf",
+        )
+        meta = svc.fetch_and_register(source)
+
+        self.assertEqual(meta.sha256, digest)
+        self.assertEqual(server.request_counts.get("/primary.gtf"), 1)
+        self.assertEqual(server.request_counts.get("/mirror.gtf"), 1)
+
+    def test_fetch_and_register_total_attempts_never_exceed_retries(self):
+        server = self._start_server({
+            "/a.gtf": (500, b"err"),
+            "/b.gtf": (500, b"err"),
+            "/c.gtf": (500, b"err"),
+        })
+
+        svc = ReferenceDataService(settings=self._make_settings(retries=2))
+        source = ReferenceDataSourceSpec(
+            url=f"{server.base_url}/a.gtf",
+            mirrors=[
+                f"{server.base_url}/b.gtf",
+                f"{server.base_url}/c.gtf",
+            ],
+            sha256="0" * 64,
+            kind="gtf",
+        )
+        with self.assertRaises(ReferenceDataError):
+            svc.fetch_and_register(source)
+
+        self.assertEqual(server.request_counts.get("/a.gtf"), 1)
+        self.assertEqual(server.request_counts.get("/b.gtf"), 1)
+        self.assertIsNone(server.request_counts.get("/c.gtf"))
+
+    def test_fetch_and_register_disk_pre_check_blocks_before_network(self):
+        # Do not start a server; the pre-check must fail before any network I/O.
+        svc = ReferenceDataService(settings=self._make_settings(retries=1))
+        source = ReferenceDataSourceSpec(
+            url="http://127.0.0.1:9/should-not-be-requested.gtf",
+            sha256="0" * 64,
+            kind="gtf",
+            size_hint=10**18,
+        )
+        with self.assertRaises(ReferenceDataError) as ctx:
+            svc.fetch_and_register(source)
+
+        self.assertIn("insufficient_disk_space", str(ctx.exception))
+        # No server was started, so no request could have been made.
+
+    def test_fetch_and_register_temp_file_always_cleaned_up(self):
+        content = b"temp cleanup check"
+        digest = hashlib.sha256(content).hexdigest()
+        server = self._start_server({"/ref.gtf": (200, content)})
+
+        svc = ReferenceDataService(settings=self._make_settings())
+        source = ReferenceDataSourceSpec(
+            url=f"{server.base_url}/ref.gtf",
+            sha256=digest,
+            kind="gtf",
+        )
+        svc.fetch_and_register(source)
+
+        tmp_dir = svc._root / "_tmp"
+        if tmp_dir.exists():
+            self.assertEqual(list(tmp_dir.glob("fetch_*.bin")), [])
+
+    def test_fetch_and_register_no_proxy_honored(self):
+        """When 127.0.0.1 is in no_proxy, the bogus proxy must not be used."""
+        content = b"local content"
+        digest = hashlib.sha256(content).hexdigest()
+        server = self._start_server({"/ref.gtf": (200, content)})
+
+        svc = ReferenceDataService(
+            settings=Settings(
+                data_root=self.data_root,
+                reference_download_retries=1,
+                reference_download_timeout_s=5,
+                http_proxy="http://127.0.0.1:1",  # unreachable
+                no_proxy="127.0.0.1",
+            )
+        )
+        source = ReferenceDataSourceSpec(
+            url=f"{server.base_url}/ref.gtf",
+            sha256=digest,
+            kind="gtf",
+        )
+        meta = svc.fetch_and_register(source)
+        self.assertEqual(meta.sha256, digest)
 
 
 if __name__ == "__main__":

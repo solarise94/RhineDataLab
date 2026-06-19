@@ -385,6 +385,9 @@ class CommandTemplateWorkerAdapter(WorkerAdapter):
         python_runtime_paths = CommandTemplateWorkerAdapter._python_runtime_ro_binds(current_python)
         launch_template_paths = CommandTemplateWorkerAdapter._launch_template_ro_binds(adapter_extra_env_keys, environment)
         r_user_libs = CommandTemplateWorkerAdapter._r_user_library_ro_binds(settings)
+        # Layer C: explicitly expose the reference-data registry so future
+        # sandbox tightening does not break BLUEPRINT_REFERENCE_PATHS.
+        reference_data_root = Path(getattr(settings, "data_root", "")) / "_system" / "reference-data"
         bind_args: list[str] = [
             bwrap,
             "--die-with-parent",
@@ -404,6 +407,7 @@ class CommandTemplateWorkerAdapter(WorkerAdapter):
                 *python_runtime_paths,
                 *launch_template_paths,
                 *r_user_libs,
+                str(reference_data_root),
             ]:
                 if Path(host_path).exists():
                     bind_args.extend(["--ro-bind", host_path, host_path])
@@ -649,6 +653,7 @@ class CommandTemplateWorkerAdapter(WorkerAdapter):
             "rscript": environment.get("BLUEPRINT_RSCRIPT"),
             "backend_root": str(backend_root),
             "python_executable": str(current_python),
+            "reference_data_root": str(reference_data_root) if reference_data_root.exists() else None,
             "clearenv": True,
             "data_mount": {
                 "source": packet.mounted_data_directory,

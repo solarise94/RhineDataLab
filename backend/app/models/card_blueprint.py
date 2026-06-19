@@ -123,17 +123,35 @@ class BlueprintRuntimeRequirements(BaseModel):
     r: BlueprintRuntimeRequirement | Literal["__system__"] = "__system__"
 
 
+ReferenceDataKind = Literal["gtf", "fasta", "index", "annotation", "table", "other"]
+
+
+class ReferenceDataSourceSpec(BaseModel):
+    """Source specification for a reference file that can be fetched ahead of
+    execution. ``sha256`` is required; downloads are rejected if the fetched
+    content does not match. Mirrors are tried in order when the primary URL
+    fails."""
+
+    url: str
+    mirrors: list[str] = Field(default_factory=list)
+    sha256: str
+    kind: ReferenceDataKind = "other"
+    filename: str | None = None
+    size_hint: int | None = None
+
+
 class ReferenceAssetRef(BaseModel):
     """A bundled reference-data dependency (e.g. a GTF annotation) the card
-    needs at run time. ``ref_id`` points into the shared reference-data
-    registry; the concrete host path is resolved at instantiation and exposed
-    to the executor as a file reference (an env dependency, not a consumed
-    input slot)."""
+    needs at run time. Either ``ref_id`` (already registered) or ``source``
+    (fetchable) must be provided when the reference is required. The concrete
+    host path is resolved at instantiation and exposed to the executor as a
+    file reference (an env dependency, not a consumed input slot)."""
 
-    ref_id: str
+    ref_id: str | None = None
     role: str
     required: bool = True
     description: str | None = None
+    source: ReferenceDataSourceSpec | None = None
 
 
 class BlueprintProvenance(BaseModel):
@@ -244,6 +262,8 @@ class InstantiateResult(BaseModel):
     card_id: str
     warnings: list[str] = Field(default_factory=list)
     blockers: list[str] = Field(default_factory=list)
+    # Layer C: source-only reference assets that need a background download job.
+    pending_reference_downloads: list[dict[str, Any]] = Field(default_factory=list)
 
 
 # ---------------------------------------------------------------------------
