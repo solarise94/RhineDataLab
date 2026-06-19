@@ -24,6 +24,7 @@ from app.core.paths import (
     project_root,
 )
 from app.models.cards import Card, CardAssetRef
+from app.models.executor import ExecutorContext, ExecutorReference
 from app.models.graph import Asset, Claim, GraphState, Module, ModuleRef, ReportItem
 from app.models.output_contracts import CardOutputSpec
 from app.models.project import (
@@ -779,6 +780,25 @@ class ProjectService:
                 linked_modules=["module_de_analysis"],
                 linked_runs=["run_004"],
                 linked_assets=["deg_table_v1", "volcano_plot_v1"],
+                # Showcase the reference-data pipeline (docs/63): a pre-resolved
+                # reference (here, a GENCODE annotation used for gene-ID
+                # mapping) is exposed to the executor via BLUEPRINT_REFERENCE_PATHS.
+                # In a live project this path would be filled by a background
+                # download job once the card's source-only reference resolves.
+                executor_context=ExecutorContext(
+                    references=[
+                        ExecutorReference(
+                            type="file",
+                            path="reference/gencode.v44.annotation.gtf.gz",
+                            description="gtf_annotation",
+                        ),
+                    ],
+                    template_metadata={
+                        "reference_paths": {
+                            "gtf_annotation": "reference/gencode.v44.annotation.gtf.gz",
+                        },
+                    },
+                ),
             ),
             Card(
                 card_id="card_enrichment_group",

@@ -1,6 +1,6 @@
 [project]
 name = "blueprint-re-backend"
-version = "0.4.5"
+version = "0.5.1"
 description = "Git-native bioinformatics project manager"
 requires-python = ">=3.13"
 dependencies = [
