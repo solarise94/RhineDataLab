@@ -38,6 +38,8 @@ export function ModuleCard({
   onSelect,
   onStartRun,
   onReviewRun,
+  onRerunCard,
+  onRunSubgraph,
   onAskManager,
   onPreviewAsset,
   workerCapabilities = [],
@@ -63,6 +65,8 @@ export function ModuleCard({
   onSelect: (card: Card) => void;
   onStartRun: (card: Card) => void;
   onReviewRun: (card: Card) => void;
+  onRerunCard?: (card: Card, propagate?: string) => void;
+  onRunSubgraph?: (card: Card) => void;
   onAskManager?: (text: string) => void;
   onPreviewAsset?: (assetId: string, cardId?: string) => void;
   workerCapabilities?: WorkerCapability[];
@@ -373,6 +377,29 @@ export function ModuleCard({
                     </label>
                     <button className="btn primary" disabled={readOnly} style={{ width: "100%" }} onClick={(e) => { e.stopPropagation(); onStartRun(card); }}>
                       <Play size={14} /> 开始执行
+                    </button>
+                  </div>
+                ) : null}
+
+                {card.status !== "planned" && card.status !== "running" && card.status !== "reviewing" && card.status !== "proposed" ? (
+                  <div className="executor-run-control" style={{ marginTop: 12 }}>
+                    <button
+                      className="btn secondary"
+                      disabled={readOnly}
+                      style={{ width: "100%" }}
+                      onClick={(e) => { e.stopPropagation(); onRerunCard?.(card, "all"); }}
+                      title="重跑本卡片，下游全部标为 stale"
+                    >
+                      <RotateCcw size={14} /> 重跑本卡（级联下游）
+                    </button>
+                    <button
+                      className="btn primary"
+                      disabled={readOnly}
+                      style={{ width: "100%", marginTop: 8 }}
+                      onClick={(e) => { e.stopPropagation(); onRunSubgraph?.(card); }}
+                      title="从本卡片开始，按拓扑序跑到末尾"
+                    >
+                      <Play size={14} /> 从这里跑到末尾
                     </button>
                   </div>
                 ) : null}

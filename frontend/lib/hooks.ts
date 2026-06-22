@@ -540,13 +540,39 @@ export function useRerunCardMutation(projectId: string) {
       profileId,
       pythonRuntime,
       rRuntime,
+      propagate,
     }: {
       cardId: string;
       workerType?: string;
       profileId?: string;
       pythonRuntime?: string;
       rRuntime?: string;
-    }) => api.rerunCard(projectId, cardId, workerType, profileId, pythonRuntime, rRuntime),
+      propagate?: string;
+    }) => api.rerunCard(projectId, cardId, workerType, profileId, pythonRuntime, rRuntime, propagate),
+    onSuccess: async () => {
+      await refresh();
+    },
+  });
+}
+
+export function useStartSubgraphRunMutation(projectId: string) {
+  const refresh = useWorkspaceRefresh(projectId);
+  return useMutation({
+    mutationFn: ({
+      startCardId,
+      workerType,
+      profileId,
+      pythonRuntime,
+      rRuntime,
+      propagate,
+    }: {
+      startCardId: string;
+      workerType?: string;
+      profileId?: string;
+      pythonRuntime?: string;
+      rRuntime?: string;
+      propagate?: string;
+    }) => api.startSubgraphRun(projectId, startCardId, "from_card", workerType, profileId, pythonRuntime, rRuntime, propagate),
     onSuccess: async () => {
       await refresh();
     },

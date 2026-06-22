@@ -102,36 +102,9 @@ class DependencyAttentionService:
     def affected_downstream(self, snapshot: dict[str, Any], source_card_id: str) -> list[dict[str, Any]]:
         cards: list[Card] = list(snapshot.get("cards") or [])
         graph: GraphState = snapshot["graph"]
-        producer_by_asset = self._producer_by_asset(cards, graph.assets, graph.runs)
-        produced_by_card: dict[str, set[str]] = {}
-        for asset_id, card_id in producer_by_asset.items():
-            produced_by_card.setdefault(card_id, set()).add(asset_id)
-        for card in cards:
-            for output in card.outputs:
-                if output.asset_id:
-                    produced_by_card.setdefault(card.card_id, set()).add(output.asset_id)
+        consumers_by_card = self.build_consumer_edges(cards, graph)
 
         card_by_id = {card.card_id: card for card in cards}
-        asset_by_id = {asset.asset_id: asset for asset in graph.assets}
-        consumers_by_card: dict[str, set[str]] = {}
-
-        for card in cards:
-            for input_ref in card.inputs:
-                if not input_ref.asset_id:
-                    continue
-                producer_card_id = producer_by_asset.get(input_ref.asset_id)
-                if producer_card_id and producer_card_id != card.card_id:
-                    consumers_by_card.setdefault(producer_card_id, set()).add(card.card_id)
-
-        for asset in graph.assets:
-            target_card_id = producer_by_asset.get(asset.asset_id)
-            if not target_card_id:
-                continue
-            for upstream_asset_id in asset.depends_on:
-                upstream_card_id = producer_by_asset.get(upstream_asset_id)
-                if upstream_card_id and upstream_card_id != target_card_id:
-                    consumers_by_card.setdefault(upstream_card_id, set()).add(target_card_id)
-
         queue = [(source_card_id, 0)]
         seen = {source_card_id}
         affected: list[dict[str, Any]] = []
@@ -154,6 +127,36 @@ class DependencyAttentionService:
                     queue.append((downstream_id, downstream_depth))
 
         return sorted(affected, key=lambda item: (int(item["dependency_depth"]), str(item["card_id"])))
+
+    @classmethod
+    def build_consumer_edges(cls, cards: list[Card], graph: GraphState) -> dict[str, set[str]]:
+        """Return a map from producer card id to the set of downstream card ids.
+
+        Edges are derived from card input references (resolved to a producer card)
+        and from asset lineage dependencies. The result is used both for diagnostic
+        downstream traversal and for push-time invalidation scheduling.
+        """
+        producer_by_asset = cls._producer_by_asset(cards, graph.assets, graph.runs)
+
+        consumers_by_card: dict[str, set[str]] = {}
+        for card in cards:
+            for input_ref in card.inputs:
+                if not input_ref.asset_id:
+                    continue
+                producer_card_id = producer_by_asset.get(input_ref.asset_id)
+                if producer_card_id and producer_card_id != card.card_id:
+                    consumers_by_card.setdefault(producer_card_id, set()).add(card.card_id)
+
+        for asset in graph.assets:
+            target_card_id = producer_by_asset.get(asset.asset_id)
+            if not target_card_id:
+                continue
+            for upstream_asset_id in asset.depends_on:
+                upstream_card_id = producer_by_asset.get(upstream_asset_id)
+                if upstream_card_id and upstream_card_id != target_card_id:
+                    consumers_by_card.setdefault(upstream_card_id, set()).add(target_card_id)
+
+        return consumers_by_card
 
     def mutation_hint(self, snapshot: dict[str, Any], source_card_id: str) -> dict[str, Any]:
         affected = self.affected_downstream(snapshot, source_card_id)

@@ -96,6 +96,7 @@ class StartCardRunPayload(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     card_id: str
+    propagate: str = "all"
 
 
 class StopCardRunPayload(BaseModel):
@@ -2710,6 +2711,7 @@ class ManagerBlueprintTools:
             response = self.worker_service.rerun_card(
                 project_id,
                 request.card_id,
+                propagate=request.propagate,
             )
             return self._manager_run_start_payload(response, rerun=True)
         except HTTPException as exc:

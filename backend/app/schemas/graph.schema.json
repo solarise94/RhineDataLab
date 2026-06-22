@@ -439,6 +439,23 @@
           "default": false,
           "title": "Needs Manager Attention",
           "type": "boolean"
+        },
+        "propagate_invalidation": {
+          "default": true,
+          "title": "Propagate Invalidation",
+          "type": "boolean"
+        },
+        "batch_run_id": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Batch Run Id"
         }
       },
       "required": [

@@ -58,6 +58,7 @@ from app.services.app_config_service import AppConfigService
 from app.services.artifact_format_service import default_format_for_artifact_class
 from app.services.background_task_service import BackgroundTaskService
 from app.services.asset_materialization_service import AssetMaterializationService
+from app.services.downstream_invalidation_service import DownstreamInvalidationService
 from app.services.flow_service import FlowService
 from app.services.executor_validation_service import ExecutorValidationService
 from app.services.input_resolution_service import InputResolutionService
@@ -68,6 +69,7 @@ from app.services.project_event_service import ProjectEventService
 from app.services.project_service import ProjectService
 from app.services.runtime_approval_service import RuntimeApprovalService
 from app.services.runtime_dependency_state_service import ACTIVE_RUNTIME_DEPENDENCY_JOB_STATUSES
+from app.services.subgraph_run_service import SubgraphRunService
 from app.services.utils import atomic_write_json, utc_now
 from app.workers import build_worker_registry
 
@@ -167,6 +169,7 @@ class WorkerService:
             project_service.settings,
         )
         self.flow_service = FlowService(project_service)
+        self.subgraph_run_service = SubgraphRunService(project_service, self)
         self.input_resolution_service = InputResolutionService()
         self.executor_validation_service = ExecutorValidationService(project_service)
         self.registry = build_worker_registry()
@@ -218,6 +221,8 @@ class WorkerService:
         profile_id: str | None = None,
         python_runtime: str | None = None,
         r_runtime: str | None = None,
+        propagate_invalidation: bool = True,
+        batch_run_id: str | None = None,
     ) -> dict:
         python_runtime = self._normalize_python_runtime(python_runtime)
         r_runtime = self._normalize_r_runtime(r_runtime)
@@ -274,6 +279,8 @@ class WorkerService:
                 profile_id=resolved_profile_id,
                 python_runtime=python_runtime,
                 r_runtime=r_runtime,
+                propagate_invalidation=propagate_invalidation,
+                batch_run_id=batch_run_id,
             )
         except Exception:
             self._release_execution_guard(execution_guard, guard_kind)
@@ -290,6 +297,8 @@ class WorkerService:
         profile_id: str | None = None,
         python_runtime: str | None = None,
         r_runtime: str | None = None,
+        propagate_invalidation: bool = True,
+        batch_run_id: str | None = None,
     ) -> dict:
         lock = self.project_service.lock_for(project_id)
         with lock:
@@ -399,6 +408,8 @@ class WorkerService:
                     started_at=utc_now(),
                     finished_at=utc_now() if rejected else None,
                     worker_type=resolved_worker_type,
+                    propagate_invalidation=propagate_invalidation,
+                    batch_run_id=batch_run_id,
                 )
             )
             self.background_task_service.update_task(
@@ -705,6 +716,38 @@ class WorkerService:
         self._emit_project_event(project_id, reason="card_run_state_reset", card_id=card_id, status="planned")
         return {"card_id": card_id, "status": "planned"}
 
+    def start_subgraph_run(
+        self,
+        project_id: str,
+        start_card_id: str,
+        *,
+        mode: str = "from_card",
+        worker_type: str | None = None,
+        profile_id: str | None = None,
+        python_runtime: str | None = None,
+        r_runtime: str | None = None,
+        propagate: str = "all",
+        stop_on_fail: bool = True,
+    ) -> dict:
+        if mode != "from_card":
+            raise HTTPException(status_code=400, detail=f"Unsupported subgraph mode: {mode}")
+        return self.subgraph_run_service.start_from_card(
+            project_id,
+            start_card_id,
+            worker_type=worker_type,
+            profile_id=profile_id,
+            python_runtime=python_runtime,
+            r_runtime=r_runtime,
+            propagate=propagate,
+            stop_on_fail=stop_on_fail,
+        )
+
+    def get_subgraph_run(self, project_id: str, batch_run_id: str) -> dict | None:
+        state = self.subgraph_run_service.get_batch_state(project_id, batch_run_id)
+        if state is None:
+            return None
+        return {"batch_run": state}
+
     def rerun_card(
         self,
         project_id: str,
@@ -713,11 +756,14 @@ class WorkerService:
         profile_id: str | None = None,
         python_runtime: str | None = None,
         r_runtime: str | None = None,
+        propagate: str = "all",
+        batch_run_id: str | None = None,
     ) -> dict:
         python_runtime = self._normalize_python_runtime(python_runtime)
         r_runtime = self._normalize_r_runtime(r_runtime)
         requested_profile_id = profile_id
         old_execution_run_ids: list[str] = []
+        propagate_options = DownstreamInvalidationService.parse_propagate(propagate)
         lock = self.project_service.lock_for(project_id)
         with lock:
             store = self.project_service.graph_store(project_id)
@@ -726,7 +772,7 @@ class WorkerService:
             card = next((item for item in cards if item.card_id == card_id), None)
             if card is None:
                 raise HTTPException(status_code=404, detail=f"Card not found: {card_id}")
-            if card.status in {"running", "reviewing", "proposed", "superseded", "stale"}:
+            if card.status in {"running", "reviewing", "proposed", "superseded"}:
                 raise HTTPException(status_code=409, detail=f"Card {card_id} cannot rerun from status {card.status}.")
             if self._has_active_run(graph.runs, card_id):
                 raise HTTPException(status_code=409, detail=f"Card {card_id} already has an active run.")
@@ -743,15 +789,22 @@ class WorkerService:
                     legacy_profile = card.executor_context.executor_profile
                     if not legacy_profile.endswith("_worker"):
                         requested_profile_id = legacy_profile
+            previous_status = card.status
             if card.status != "planned":
-                previous_status = card.status
                 card.status = "planned"
                 card.progress_note = None
                 card.manager_review = f"Preparing rerun from previous status {previous_status}."
-                ModuleGroupStateService.sync_linked_module_status_from_card(card, graph.modules)
-                ModuleGroupStateService.sync_group_hierarchy(cards, graph.modules)
-                store.save_graph(graph)
-                store.save_cards(cards)
+            if propagate_options["enabled"]:
+                DownstreamInvalidationService.invalidate_from(
+                    graph,
+                    cards,
+                    card_id,
+                    max_depth=propagate_options.get("max_depth"),
+                )
+            ModuleGroupStateService.sync_linked_module_status_from_card(card, graph.modules)
+            ModuleGroupStateService.sync_group_hierarchy(cards, graph.modules)
+            store.save_graph(graph)
+            store.save_cards(cards)
         self._cleanup_execution_files_for_runs(project_id, old_execution_run_ids)
         return self.start_run(
             project_id,
@@ -760,6 +813,8 @@ class WorkerService:
             profile_id=requested_profile_id,
             python_runtime=python_runtime,
             r_runtime=r_runtime,
+            propagate_invalidation=propagate_options["enabled"],
+            batch_run_id=batch_run_id,
         )
 
     def review_run(self, project_id: str, run_id: str, accept: bool = True) -> dict:
@@ -1067,6 +1122,14 @@ class WorkerService:
                     run.status = "reviewed"
                     run.finished_at = utc_now()
                     run.needs_manager_attention = False
+
+            # Push-time invalidation: after an accepted run supersedes the previous
+            # outputs, mark the downstream cards/assets stale so the UI shows what
+            # needs rerunning. Skipped when this run opted out (propagate=none) — e.g.
+            # single-card debugging or subgraph members whose ordering is handled by
+            # the batch scheduler.
+            if final_accept and getattr(run, "propagate_invalidation", True):
+                DownstreamInvalidationService.invalidate_from(graph, cards, card.card_id)
 
             ModuleGroupStateService.sync_linked_module_status_from_card(card, graph.modules)
             ModuleGroupStateService.sync_group_hierarchy(cards, graph.modules)

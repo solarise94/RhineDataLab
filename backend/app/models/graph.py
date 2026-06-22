@@ -124,6 +124,8 @@ class RunRecord(BaseModel):
     archived_at: str | None = None
     cleanup_status: Literal["pending", "completed"] | None = None
     needs_manager_attention: bool = False
+    propagate_invalidation: bool = True
+    batch_run_id: str | None = None
 
 
 class ReportItem(BaseModel):

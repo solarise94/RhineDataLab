@@ -20,7 +20,9 @@ import {
   useReportReorderMutation,
   useResultAsset,
   useReviewRunMutation,
+  useRerunCardMutation,
   useStartRunMutation,
+  useStartSubgraphRunMutation,
   useUpdateProjectRuntimePreferencesMutation,
   useWorkOrder,
   useWorkspaceRefresh,
@@ -181,6 +183,8 @@ export function ProjectWorkspace({ projectId, view }: { projectId: string; view:
   const advancedGitQuery = useAdvancedGit(projectId, view === "advanced");
   const startRunMutation = useStartRunMutation(projectId);
   const reviewRunMutation = useReviewRunMutation(projectId);
+  const rerunCardMutation = useRerunCardMutation(projectId);
+  const startSubgraphRunMutation = useStartSubgraphRunMutation(projectId);
   const updateProjectRuntimePreferencesMutation = useUpdateProjectRuntimePreferencesMutation(projectId);
   const reorderReportMutation = useReportReorderMutation(projectId);
   const exportReportMutation = useReportExportMutation(projectId);
@@ -685,6 +689,27 @@ export function ProjectWorkspace({ projectId, view }: { projectId: string; view:
     }
   }
 
+  async function handleRerunCard(card: Card, propagate?: string) {
+    setNotice(projectId, null);
+    setSelectedCard(projectId, card.card_id);
+    try {
+      await rerunCardMutation.mutateAsync({ cardId: card.card_id, propagate });
+    } catch (error) {
+      reportActionError(error, "重跑卡片失败。");
+    }
+  }
+
+  async function handleRunSubgraph(card: Card) {
+    setNotice(projectId, null);
+    setSelectedCard(projectId, card.card_id);
+    try {
+      await startSubgraphRunMutation.mutateAsync({ startCardId: card.card_id });
+      setNotice(projectId, `已启动从 ${card.title} 到末尾的选区运行。`);
+    } catch (error) {
+      reportActionError(error, "启动选区运行失败。");
+    }
+  }
+
   async function handleMoveReport(itemId: string, direction: "up" | "down") {
     const sections = reportQuery.data?.sections ?? [];
     const index = sections.findIndex((item) => item.item_id === itemId);
@@ -747,6 +772,8 @@ export function ProjectWorkspace({ projectId, view }: { projectId: string; view:
           onClearSelection={() => setSelectedCard(projectId, null)}
           onStartRun={handleStartRun}
           onReviewRun={handleReviewRun}
+          onRerunCard={handleRerunCard}
+          onRunSubgraph={handleRunSubgraph}
           onAskManager={(text) => {
             setDraftMessage(projectId, text);
             setMobileTab(projectId, "chat");
@@ -986,6 +1013,8 @@ export function ProjectWorkspace({ projectId, view }: { projectId: string; view:
                 onClearSelection={() => setSelectedCard(projectId, null)}
                 onStartRun={handleStartRun}
                 onReviewRun={handleReviewRun}
+                onRerunCard={handleRerunCard}
+                onRunSubgraph={handleRunSubgraph}
                 onAskManager={(text) => {
                   setDraftMessage(projectId, text);
                   setMobileTab(projectId, "chat");

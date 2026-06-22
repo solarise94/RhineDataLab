@@ -725,7 +725,7 @@ export const api = {
       method: "POST",
     });
   },
-  rerunCard(projectId: string, cardId: string, workerType?: string, profileId?: string, pythonRuntime?: string, rRuntime?: string) {
+  rerunCard(projectId: string, cardId: string, workerType?: string, profileId?: string, pythonRuntime?: string, rRuntime?: string, propagate?: string) {
     return request<StartRunResponse>(`/projects/${projectId}/cards/${cardId}/rerun`, {
       method: "POST",
       body: JSON.stringify({
@@ -733,6 +733,21 @@ export const api = {
         profile_id: profileId ?? null,
         python_runtime: pythonRuntime ?? null,
         r_runtime: rRuntime ?? null,
+        propagate: propagate ?? "all",
+      }),
+    });
+  },
+  startSubgraphRun(projectId: string, startCardId: string, mode: "from_card", workerType?: string, profileId?: string, pythonRuntime?: string, rRuntime?: string, propagate?: string) {
+    return request<StartRunResponse>(`/projects/${projectId}/runs/subgraph`, {
+      method: "POST",
+      body: JSON.stringify({
+        mode,
+        start_card_id: startCardId,
+        worker_type: workerType ?? null,
+        profile_id: profileId ?? null,
+        python_runtime: pythonRuntime ?? null,
+        r_runtime: rRuntime ?? null,
+        propagate: propagate ?? "all",
       }),
     });
   },

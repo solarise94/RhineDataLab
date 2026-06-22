@@ -17,6 +17,8 @@ export function CardStream({
   onClearSelection,
   onStartRun,
   onReviewRun,
+  onRerunCard,
+  onRunSubgraph,
   onAskManager,
   onPreviewAsset,
   workerCapabilities = [],
@@ -44,6 +46,8 @@ export function CardStream({
   onClearSelection?: () => void;
   onStartRun: (card: Card) => void;
   onReviewRun: (card: Card) => void;
+  onRerunCard?: (card: Card, propagate?: string) => void;
+  onRunSubgraph?: (card: Card) => void;
   onAskManager?: (text: string) => void;
   onPreviewAsset?: (assetId: string, cardId?: string) => void;
   workerCapabilities?: WorkerCapability[];
@@ -230,6 +234,8 @@ export function CardStream({
                       onSelect={onSelect}
                       onStartRun={onStartRun}
                       onReviewRun={onReviewRun}
+                      onRerunCard={onRerunCard}
+                      onRunSubgraph={onRunSubgraph}
                       readOnly={readOnly}
                       onAskManager={onAskManager}
                       onPreviewAsset={onPreviewAsset}

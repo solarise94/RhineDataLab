@@ -46,6 +46,18 @@ class RerunCardRequest(BaseModel):
     profile_id: str | None = None
     python_runtime: str | None = None
     r_runtime: str | None = None
+    propagate: str = "all"
+
+
+class SubgraphRunRequest(BaseModel):
+    mode: str = "from_card"
+    start_card_id: str
+    worker_type: str | None = None
+    profile_id: str | None = None
+    python_runtime: str | None = None
+    r_runtime: str | None = None
+    propagate: str = "all"
+    stop_on_fail: bool = True
 
 
 @router.post("/cards/{card_id}/start-run")
@@ -88,6 +100,7 @@ def rerun_card(
         profile_id=request.profile_id if request else None,
         python_runtime=request.python_runtime if request else None,
         r_runtime=request.r_runtime if request else None,
+        propagate=request.propagate if request else "all",
     )
 
 
@@ -114,6 +127,37 @@ def get_run_manifest(project_id: str, run_id: str, manifest_service: ManifestSer
         "errors": errors,
         "review_context": manifest_service.manifest_to_review_context(project_id, run_id) if ok else None,
     }
+
+
+@router.post("/runs/subgraph")
+def start_subgraph_run(
+    project_id: str,
+    request: SubgraphRunRequest,
+    worker_service: WorkerService = Depends(get_worker_service),
+) -> dict:
+    return worker_service.start_subgraph_run(
+        project_id,
+        request.start_card_id,
+        mode=request.mode,
+        worker_type=request.worker_type,
+        profile_id=request.profile_id,
+        python_runtime=request.python_runtime,
+        r_runtime=request.r_runtime,
+        propagate=request.propagate,
+        stop_on_fail=request.stop_on_fail,
+    )
+
+
+@router.get("/runs/subgraph/{batch_run_id}")
+def get_subgraph_run(
+    project_id: str,
+    batch_run_id: str,
+    worker_service: WorkerService = Depends(get_worker_service),
+) -> dict:
+    result = worker_service.get_subgraph_run(project_id, batch_run_id)
+    if result is None:
+        raise HTTPException(status_code=404, detail=f"Batch run not found: {batch_run_id}")
+    return result
 
 
 @router.post("/runs/{run_id}/review")
