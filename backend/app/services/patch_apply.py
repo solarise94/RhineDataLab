@@ -11,7 +11,7 @@ from app.models.patches import ApplyResult, GraphPatch
 from app.services.module_group_state_service import ModuleGroupStateService
 from app.services.patch_validator import PatchValidator
 from app.services.project_service import ProjectService
-from app.services.utils import atomic_write_json, read_json, utc_now
+from app.services.utils import atomic_write_bytes, atomic_write_json, read_json, utc_now
 
 
 logger = logging.getLogger(__name__)
@@ -315,10 +315,10 @@ class PatchApplyService:
                     if path.exists():
                         path.unlink()
                 else:
-                    path.parent.mkdir(parents=True, exist_ok=True)
-                    path.write_bytes(payload)
+                    atomic_write_bytes(path, payload)
             return True
         except Exception:
+            logger.exception("Failed to restore project snapshot during patch rollback")
             return False
 
     @staticmethod

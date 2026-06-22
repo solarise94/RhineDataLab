@@ -357,6 +357,12 @@ class RuntimeDependencyResolverService:
         self._explicit_conda_solver = conda_solver
         self._cache = _ResolverCache(ttl_seconds=cache_ttl_seconds)
         self._probe_timeout = probe_timeout_seconds
+        # Fail-closed default for the fallback policy. resolve() overwrites this
+        # with the normalized requested policy on every call; until then (and if a
+        # helper is ever reached before resolve() runs) the restrictive
+        # ``report_only`` applies, so an unset policy can never silently authorize a
+        # registry install. See audit §6.2.
+        self._active_policy: str = "report_only"
 
     # -- public API --------------------------------------------------------
 
@@ -893,7 +899,7 @@ class RuntimeDependencyResolverService:
             # and the active policy allows safe registry installs, downgrade to
             # fallback_required so the caller can retry via pip / cran /
             # bioconductor instead of blocking on a transient conda issue.
-            if fallback and getattr(self, "_active_policy", "report_only") == "allow_safe_registry_install":
+            if fallback and self._active_policy == "allow_safe_registry_install":
                 return ResolverPackageEntry(
                     name=pkg,
                     normalized_name=normalized,
@@ -962,7 +968,7 @@ class RuntimeDependencyResolverService:
             for pkg in plan.packages
             if pkg.status == PACKAGE_STATUS_FALLBACK_REQUIRED
         ]
-        policy = getattr(self, "_active_policy", "allow_safe_registry_install")
+        policy = self._active_policy
 
         if not non_conda_packages:
             return
@@ -1068,7 +1074,7 @@ class RuntimeDependencyResolverService:
 
         # All-fallback: policy-aware.
         if has_fallback and not has_conda:
-            policy = getattr(self, "_active_policy", "allow_safe_registry_install")
+            policy = self._active_policy
             if fallback_policy_allows(policy) and plan.installable and not plan.blocked:
                 # Single-family safe fallback already accepted.
                 return (
@@ -1254,7 +1260,7 @@ class RuntimeDependencyResolverService:
                     except OSError:
                         conda_base_str = str(base)
         runtime_str = str(runtime or "")
-        policy = getattr(self, "_active_policy", "report_only")
+        policy = self._active_policy
         channels = _configured_channels(conda_bin, settings)
         extra = extra_channels or []
         return "|".join(

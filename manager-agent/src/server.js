@@ -12,7 +12,11 @@ registerBuiltInApiProviders();
 
 const HOST = process.env.MANAGER_AGENT_HOST || "127.0.0.1";
 const PORT = Number(process.env.MANAGER_AGENT_PORT || "18002");
-const PROVIDER = process.env.MANAGER_AGENT_PROVIDER || "deepseek";
+// Single source of truth for the default API provider on the Node side. Keep in
+// sync with DEFAULT_PROVIDER_ID in backend/app/services/app_config_service.py:
+// each runtime holds its own literal, so a default-provider change touches both.
+const DEFAULT_PROVIDER_ID = "deepseek";
+const PROVIDER = process.env.MANAGER_AGENT_PROVIDER || DEFAULT_PROVIDER_ID;
 const MODEL = process.env.MANAGER_AGENT_MODEL || process.env.BLUEPRINT_MANAGER_MODEL || "deepseek-v4-pro";
 const API_KEY = process.env.MANAGER_AGENT_API_KEY || process.env.BLUEPRINT_DEEPSEEK_API_KEY || "";
 const TIMEOUT_MS = Number(process.env.MANAGER_AGENT_TIMEOUT_MS || "600000");

@@ -11,7 +11,6 @@ from app.models.graph import Asset, GraphState, Module, RunRecord
 
 TERMINAL_CARD_STATUSES = {"accepted", "rejected", "cancelled"}
 STARTABLE_CARD_STATUSES = {"planned", "failed", "stale", "superseded"}
-VALID_INPUT_ASSET_STATUSES = {"valid", "candidate"}
 
 
 @dataclass(frozen=True)

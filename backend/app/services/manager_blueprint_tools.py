@@ -21,6 +21,7 @@ from app.models.card_blueprint import ReferenceDataSourceSpec
 from app.models.card_templates import CardTemplate, TemplateBundle, TemplateBundleFile, TemplateIoBinding, TemplateSpec
 from app.models.cards import Card, CardAssetRef
 from app.models.executor import ExecutorContext, ExecutorReference, ExecutorScriptAssetBinding
+from app.models.graph import ACTIVE_RUN_STATUSES
 from app.models.memory import ProjectMemoryItem
 from app.models.output_contracts import CardOutputSpec
 from app.models.runs import Manifest
@@ -328,7 +329,7 @@ class ManagerBlueprintTools:
         active_runs = [
             self._compact_run(run)
             for run in graph.runs
-            if run.status in {"queued", "running", "reviewing", "needs_approval"}
+            if run.status in ACTIVE_RUN_STATUSES
         ]
         blockers = self._project_blockers(snapshot, timeline)
         attention = self.dependency_attention_service.analyze_project(snapshot)
@@ -778,7 +779,7 @@ class ManagerBlueprintTools:
             errors = self._append_output_role_errors(updated, errors)
             if errors:
                 raise CardWriteValidationError(self._card_write_error_response("revise_card_plan", card_id, errors))
-            updated = self._apply_plan_revision_status(previous, updated)
+            updated, plan_revision_warnings = self._apply_plan_revision_status(previous, updated)
             cards[index] = updated
             self._sync_module_links(graph, updated, previous_card=previous)
             ModuleGroupStateService.sync_linked_module_status_from_card(updated, graph.modules)
@@ -790,6 +791,8 @@ class ManagerBlueprintTools:
         result = {"ok": True, "card": updated.model_dump(), "card_id": updated.card_id, **hint}
         if warnings:
             result["step_alignment_warnings"] = warnings
+        if plan_revision_warnings:
+            result["plan_revision_warnings"] = plan_revision_warnings
         result["parallel_group"] = f"step_{updated.step or 1}"
         return result
 
@@ -2725,6 +2728,9 @@ class ManagerBlueprintTools:
         )
         if run is None:
             raise ManagerPlanningError(f"review_card_run run not found: {run_id}")
+        # Context-specific subset, NOT the full terminal set: only "already
+        # finalized" statuses block a re-review here (a failed run may still be
+        # reviewed). Do not replace with TERMINAL_RUN_STATUSES.
         if run.status in {"reviewed", "cancelled"}:
             raise ManagerPlanningError(f"review_card_run cannot finalize run {run_id} from status {run.status}.")
         try:
@@ -2759,6 +2765,10 @@ class ManagerBlueprintTools:
         snapshot = self.project_service.get_project_snapshot(project_id)
         graph = snapshot["graph"]
         requested_statuses = {str(status).strip() for status in request.statuses if str(status).strip()}
+        # Context-specific default for cleanup, NOT the full terminal set:
+        # ``success`` runs are intentionally excluded so cleanup never sweeps away
+        # the run that produced a still-valid asset. Do not replace with
+        # TERMINAL_RUN_STATUSES.
         default_statuses = {"failed", "cancelled", "reviewed"}
         statuses = requested_statuses or default_statuses
         valid_asset_run_ids = {
@@ -3108,17 +3118,44 @@ class ManagerBlueprintTools:
         return self._normalize_card_payload(update_payload, allow_missing_card_id=True)
 
     @staticmethod
-    def _apply_plan_revision_status(previous: Card, updated: Card) -> Card:
+    def _apply_plan_revision_status(previous: Card, updated: Card) -> tuple[Card, list[dict[str, str]]]:
+        """Resolve the card status after a plan revision.
+
+        Revising a card's plan (step/inputs/outputs) sends it back to ``planned``
+        because the prior run's results are now based on a stale plan. This reset
+        is made *explicit* rather than silent: when a meaningful prior status is
+        discarded (e.g. a ``needs_review`` card whose pending review is now
+        obsolete, or an ``accepted`` card whose acceptance is invalidated), a
+        structured ``plan_revision_warnings`` entry is returned for ``update_card``
+        to surface, and an audit note is *appended* to ``manager_review`` without
+        clobbering any existing review text (matching ``annotate``'s append idiom).
+
+        ``running`` / ``reviewing`` are left untouched — a live run owns the card;
+        that branch is intentionally not a coerce (see docs/67 §2.1). Returns
+        ``(card, warnings)`` where ``warnings`` is empty unless a coerce occurred.
+        """
         if updated.status == "planned":
             updated.progress_note = None
-            return updated
+            return updated, []
         if updated.status in {"running", "reviewing"}:
-            return updated
+            return updated, []
         updated.status = "planned"
         updated.progress_note = None
-        if previous.status != "planned" and not str(updated.manager_review or "").strip():
-            updated.manager_review = f"Card plan revised from previous status {previous.status}; awaiting a new run."
-        return updated
+        note = f"Card plan revised from previous status {previous.status}; awaiting a new run."
+        current = str(updated.manager_review or "").strip()
+        if current:
+            if note not in current:
+                updated.manager_review = f"{current}\n\n{note}"
+        else:
+            updated.manager_review = note
+        warnings = [
+            {
+                "previous_status": previous.status,
+                "coerced_to": "planned",
+                "reason": "plan revised; the prior run state (e.g. pending review or acceptance) is now obsolete",
+            }
+        ]
+        return updated, warnings
 
     @staticmethod
     def _generated_card_id(title: str) -> str:
@@ -3925,7 +3962,7 @@ class ManagerBlueprintTools:
 
     @classmethod
     def _compact_card(cls, card: Card, timeline_card: dict[str, Any] | None, runs: list[Any]) -> dict[str, Any]:
-        active_run = next((run for run in reversed(runs) if run.status in {"queued", "running", "reviewing", "needs_approval"}), None)
+        active_run = next((run for run in reversed(runs) if run.status in ACTIVE_RUN_STATUSES), None)
         latest_run = runs[-1] if runs else None
         required_asset_ids = timeline_card.get("required_asset_ids", []) if timeline_card else [item.asset_id for item in card.inputs if item.asset_id]
         produced_asset_ids = (

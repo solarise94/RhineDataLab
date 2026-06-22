@@ -9,6 +9,7 @@ from app.api.deps import (
     get_runtime_approval_service,
     get_worker_service,
 )
+from app.models.graph import TERMINAL_RUN_STATUSES
 from app.services.manifest_service import ManifestService
 from app.services.project_service import ProjectService
 from app.services.runtime_approval_service import RuntimeApprovalService
@@ -194,7 +195,7 @@ async def run_events_ws(project_id: str, run_id: str, websocket: WebSocket) -> N
                 sent += 1
             graph = store.load_graph()
             run = next((item for item in graph.runs if item.run_id == run_id), None)
-            if run and run.status in {"success", "failed", "cancelled", "reviewed"} and sent >= len(events):
+            if run and run.status in TERMINAL_RUN_STATUSES and sent >= len(events):
                 break
             await asyncio.sleep(0.5)
     except WebSocketDisconnect:

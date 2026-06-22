@@ -533,6 +533,44 @@ class ResolverFallbackPolicyTest(unittest.TestCase):
         self.assertFalse(fallback_policy_allows("report_only"))
         self.assertTrue(fallback_policy_allows("allow_safe_registry_install"))
 
+    def test_active_policy_defaults_fail_closed_before_resolve(self) -> None:
+        """A freshly constructed resolver must default to the restrictive policy.
+
+        Audit §6.2: the policy-reading sites used getattr() with inconsistent
+        defaults (some fail-open). They now read ``self._active_policy`` directly,
+        which is established fail-closed at construction so an unset policy can
+        never silently authorize a registry install before resolve() runs.
+        """
+        resolver = RuntimeDependencyResolverService()
+        self.assertEqual(resolver._active_policy, "report_only")
+        self.assertFalse(fallback_policy_allows(resolver._active_policy))
+
+    def test_active_policy_reflects_requested_policy_after_resolve(self) -> None:
+        """resolve() overwrites the fail-closed default with the requested policy."""
+        resolver = RuntimeDependencyResolverService()
+        with patch.object(
+            RuntimeDependencyResolverService,
+            "_probe_runtime",
+            return_value=RuntimeProbeResult(present=True, resolved_path=Path("/tmp/env")),
+        ), patch.object(
+            RuntimeDependencyResolverService,
+            "_resolve_conda_solver",
+            return_value=Path("/usr/bin/mamba"),
+        ), patch.object(
+            RuntimeDependencyResolverService,
+            "_probe_conda",
+            return_value=ProbeResult(status="not_found"),
+        ):
+            payload = {
+                "ecosystem": "python",
+                "runtime": "python_env",
+                "packages": ["pydeseq2"],
+            }
+            resolver.resolve("proj", payload, policy="allow_safe_registry_install")
+            self.assertEqual(resolver._active_policy, "allow_safe_registry_install")
+            resolver.resolve("proj", payload, policy="report_only")
+            self.assertEqual(resolver._active_policy, "report_only")
+
     def test_collect_fallback_actions_report_only(self) -> None:
         resolver = RuntimeDependencyResolverService()
         with patch.object(

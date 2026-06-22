@@ -27,7 +27,18 @@ from app.models.executor import (
     ManagerReportingContract,
     RuntimeBindings,
 )
-from app.models.graph import Asset, Claim, GraphState, Module, ReportItem, RunRecord
+from app.models.graph import (
+    ACTIVE_RUN_STATUSES,
+    RESTART_ORPHANED_RUN_STATUSES,
+    TERMINAL_RUN_STATUSES,
+    VALID_INPUT_ASSET_STATUSES,
+    Asset,
+    Claim,
+    GraphState,
+    Module,
+    ReportItem,
+    RunRecord,
+)
 from app.models.output_contracts import CardOutputSpec
 from app.models.runs import (
     ExecutorCompletionReport,
@@ -49,7 +60,7 @@ from app.services.background_task_service import BackgroundTaskService
 from app.services.asset_materialization_service import AssetMaterializationService
 from app.services.flow_service import FlowService
 from app.services.executor_validation_service import ExecutorValidationService
-from app.services.input_resolution_service import InputResolutionService, VALID_LAUNCHABLE_INPUT_STATUSES
+from app.services.input_resolution_service import InputResolutionService
 from app.services.library_registry_service import LibraryRegistryService
 from app.services.manifest_service import ManifestService
 from app.services.module_group_state_service import ModuleGroupStateService
@@ -580,7 +591,7 @@ class WorkerService:
             card = next(item for item in cards if item.card_id == run.card_id)
             if run.status == "cancelled":
                 return {"run_id": run_id, "status": run.status, "summary": run.summary}
-            if run.status not in {"queued", "launching", "needs_approval", "running", "reviewing"}:
+            if run.status not in ACTIVE_RUN_STATUSES:
                 raise HTTPException(status_code=409, detail=f"Run {run_id} cannot be cancelled from status {run.status}.")
             message = (reason or "Run cancelled by operator.").strip()
             run.status = "cancelled"
@@ -621,7 +632,7 @@ class WorkerService:
                 raise HTTPException(status_code=404, detail=f"Run not found: {run_id}")
             if run.cleanup_status == "completed":
                 return {"run_id": run_id, "cleanup_status": run.cleanup_status, "archived_at": run.archived_at}
-            if run.status not in {"success", "failed", "cancelled", "reviewed"}:
+            if run.status not in TERMINAL_RUN_STATUSES:
                 raise HTTPException(status_code=409, detail=f"Run {run_id} cannot be cleaned up from status {run.status}.")
             if self._threads.get(run_id) and self._threads[run_id].is_alive():
                 raise HTTPException(status_code=409, detail=f"Run {run_id} still has a live executor thread.")
@@ -723,7 +734,7 @@ class WorkerService:
                 run.run_id
                 for run in graph.runs
                 if run.card_id == card_id
-                and run.status in {"success", "failed", "cancelled", "reviewed"}
+                and run.status in TERMINAL_RUN_STATUSES
                 and not (self._threads.get(run.run_id) and self._threads[run.run_id].is_alive())
             ]
             if requested_profile_id is None and card.executor_context is not None:
@@ -807,7 +818,20 @@ class WorkerService:
             }
 
             # 0a. Bootstrap legacy materializations so accept can see previous bindings.
-            AssetMaterializationService.bootstrap_from_aliases(graph, cards)
+            #     This runs inside the accept write transaction, so the seeded map
+            #     is persisted as part of the run-accept (not by a read). Surface
+            #     ambiguous guesses: bindings derived from several concrete assets
+            #     sharing one alias may resolve to the wrong asset.
+            bootstrap_report = AssetMaterializationService.bootstrap_from_aliases(graph, cards)
+            if bootstrap_report.ambiguous:
+                logger.warning(
+                    "Legacy materialization bootstrap made %d ambiguous binding guess(es) during run accept "
+                    "(project=%s run=%s); these may bind to the wrong concrete asset: %s",
+                    len(bootstrap_report.ambiguous),
+                    project_id,
+                    run_id,
+                    bootstrap_report.ambiguous,
+                )
 
             # 1. Materialize run assets: reuse existing valid assets without demotion.
             frozen_input_bindings = [
@@ -1564,7 +1588,7 @@ class WorkerService:
             card = next(item for item in cards if item.card_id == card_id)
             run.status = status
             run.summary = summary
-            if status in {"success", "failed", "cancelled", "reviewed"}:
+            if status in TERMINAL_RUN_STATUSES:
                 run.finished_at = utc_now()
             if card_status:
                 card.status = card_status
@@ -1783,7 +1807,7 @@ class WorkerService:
             for item in card.inputs
             if item.asset_id
             for resolution in [self.input_resolution_service.resolve_input(item.asset_id, resolution_index)]
-            if resolution.resolved_asset_id is None or resolution.status not in VALID_LAUNCHABLE_INPUT_STATUSES
+            if resolution.resolved_asset_id is None or resolution.status not in VALID_INPUT_ASSET_STATUSES
         ]
         if blocking_resolutions:
             raise HTTPException(
@@ -2213,6 +2237,38 @@ class WorkerService:
         except (json.JSONDecodeError, ValueError):
             return None
 
+    def _reconcile_run_summary(self, project_id: str, run_id: str) -> str:
+        """Pick an orphaned run's terminal summary, honoring any executor report
+        the subprocess wrote to disk before the backend restarted.
+
+        The executor<->backend contract (the same terminal_report.json /
+        executor_failure.json that #5 hardened on the executor side) may already
+        be on disk when reconcile runs at startup. Blindly overwriting it would
+        either mask the real failure cause or -- worse -- report a run the
+        executor actually completed as a generic "backend restarted" failure. So:
+          - report_fail / synthetic_failure -> preserve the executor's true
+            summary (keeps the reason_code+summary contract intact across restart);
+          - report_complete -> the executor finished but the backend cannot safely
+            finalize a run at startup (manifest audit / validation / review / asset
+            materialization is not replayed here -- that recovery is docs/67 §2.3b).
+            Mark failed with an honest summary that tells the user to re-run;
+          - no report -> genuine mid-flight orphan: the generic restart message is
+            the true cause.
+        """
+        terminal_report = self._load_terminal_report(project_id, run_id)
+        if terminal_report is not None and terminal_report.terminal_kind in {"report_fail", "synthetic_failure"}:
+            failure_report = self._load_executor_failure_report(project_id, run_id)
+            real = str((failure_report.summary if failure_report else None) or terminal_report.summary or "").strip()
+            if real:
+                return real
+        elif terminal_report is not None and terminal_report.terminal_kind == "report_complete":
+            return (
+                "Executor reported completion before the backend restarted; the run could "
+                "not be finalized during reconcile and was marked failed. Re-run the card to "
+                "recover its result."
+            )
+        return "Backend restarted before executor completed; run marked failed during reconcile."
+
     def _persist_backend_manager_brief(
         self,
         project_id: str,
@@ -2411,8 +2467,8 @@ class WorkerService:
         )
 
     @staticmethod
-    def _active_run_statuses() -> set[str]:
-        return {"queued", "launching", "needs_approval", "running", "reviewing"}
+    def _active_run_statuses() -> frozenset[str]:
+        return ACTIVE_RUN_STATUSES
 
     def _has_active_run(self, runs: list[RunRecord], card_id: str) -> bool:
         active = self._active_run_statuses()
@@ -3151,19 +3207,31 @@ class WorkerService:
                 changed = False
                 reconciled_run_ids: list[str] = []
                 for run in graph.runs:
-                    if run.status not in {"queued", "running", "reviewing"}:
+                    # Reconcile only the restart-orphaned statuses, NOT the full
+                    # active set: needs_approval runs are paused waiting for the
+                    # user and resume from disk, so marking them failed here would
+                    # kill legitimately-paused runs. See RESTART_ORPHANED_RUN_STATUSES.
+                    if run.status not in RESTART_ORPHANED_RUN_STATUSES:
                         continue
-                    thread = self._threads.get(run.run_id)
-                    if thread and thread.is_alive():
-                        continue
+                    # No live-thread guard: reconcile runs only from __init__, before
+                    # any worker thread is registered, so self._threads is always empty
+                    # here. Instead, honor any executor terminal report already on disk
+                    # rather than masking the real outcome with a generic message.
+                    summary = self._reconcile_run_summary(project_id, run.run_id)
                     run.status = "failed"
-                    run.summary = "Backend restarted before executor completed; run marked failed during reconcile."
+                    run.summary = summary
                     run.finished_at = utc_now()
                     card = card_map.get(run.card_id)
                     if card and card.status in {"running", "reviewing"}:
                         card.status = "failed"
                         card.progress_note = None
-                        card.manager_review = run.summary
+                        # Append, never clobber: a card may carry prior human/AI review
+                        # text. Mirrors the annotate / plan-revision append idiom (#6).
+                        existing_review = str(card.manager_review or "").strip()
+                        if not existing_review:
+                            card.manager_review = summary
+                        elif summary not in existing_review:
+                            card.manager_review = f"{existing_review}\n\n{summary}"
                         ModuleGroupStateService.sync_linked_module_status_from_card(card, graph.modules)
                     events = store.load_run_events(run.run_id)
                     events.append(

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import logging
 import re
 import zipfile
 from pathlib import Path
@@ -23,6 +24,9 @@ from app.models.packages import (
 from app.services.library_registry_service import LibraryRegistryService
 from app.services.project_service import ProjectService
 from app.services.utils import atomic_write_json, read_json, utc_now
+
+
+logger = logging.getLogger(__name__)
 
 
 # Security scan patterns for bundle files
@@ -535,37 +539,50 @@ class PackageService:
         return warnings
 
     def _resolve_capabilities(self, manifest: PackageManifest) -> tuple[list[str], list[str]]:
-        """Check whether required skills and MCPs exist in the local registry."""
+        """Check whether required skills and MCPs exist in the local registry.
+
+        A registry that FAILS TO LOAD (corrupt JSON, IO/permission error, lock
+        contention, rebuild failure) is surfaced as a single explicit blocker —
+        never silently collapsed into an empty registry. Treating a load failure
+        as "empty" would emit a false "not found" for every required capability
+        and bury the real cause. A registry that loads successfully but is
+        genuinely empty still correctly yields "not found" blockers; the `None`
+        sentinel below is what distinguishes load-error from genuinely-empty.
+        """
         warnings: list[str] = []
         blockers: list[str] = []
 
         try:
             skill_registry = self.library_registry_service._ensure_registry("skill")
-            skill_ids = {item.id for item in skill_registry.items}
-        except Exception:
-            skill_ids = set()
+            skill_ids: set[str] | None = {item.id for item in skill_registry.items}
+        except Exception as exc:
+            logger.exception("Skill library registry failed to load")
+            blockers.append(f"Registry load failed for skill: {exc}; capability check skipped.")
+            skill_ids = None
 
         try:
             mcp_registry = self.library_registry_service._ensure_registry("mcp")
-            mcp_ids = {item.id for item in mcp_registry.items}
-        except Exception:
-            mcp_ids = set()
+            mcp_ids: set[str] | None = {item.id for item in mcp_registry.items}
+        except Exception as exc:
+            logger.exception("MCP library registry failed to load")
+            blockers.append(f"Registry load failed for mcp: {exc}; capability check skipped.")
+            mcp_ids = None
 
-        for skill_id in manifest.compatibility.required_skills:
-            if skill_id not in skill_ids:
-                blockers.append(f"Required skill not found: {skill_id}")
+        if skill_ids is not None:
+            for skill_id in manifest.compatibility.required_skills:
+                if skill_id not in skill_ids:
+                    blockers.append(f"Required skill not found: {skill_id}")
+            for skill_id in manifest.compatibility.optional_skills:
+                if skill_id not in skill_ids:
+                    warnings.append(f"Optional skill not found: {skill_id}")
 
-        for skill_id in manifest.compatibility.optional_skills:
-            if skill_id not in skill_ids:
-                warnings.append(f"Optional skill not found: {skill_id}")
-
-        for mcp_id in manifest.compatibility.required_mcps:
-            if mcp_id not in mcp_ids:
-                blockers.append(f"Required MCP not found: {mcp_id}")
-
-        for mcp_id in manifest.compatibility.optional_mcps:
-            if mcp_id not in mcp_ids:
-                warnings.append(f"Optional MCP not found: {mcp_id}")
+        if mcp_ids is not None:
+            for mcp_id in manifest.compatibility.required_mcps:
+                if mcp_id not in mcp_ids:
+                    blockers.append(f"Required MCP not found: {mcp_id}")
+            for mcp_id in manifest.compatibility.optional_mcps:
+                if mcp_id not in mcp_ids:
+                    warnings.append(f"Optional MCP not found: {mcp_id}")
 
         return warnings, blockers
 

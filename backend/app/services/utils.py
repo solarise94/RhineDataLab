@@ -31,6 +31,26 @@ def atomic_write_json(path: Path, payload: object) -> None:
             os.unlink(tmp_name)
 
 
+def atomic_write_bytes(path: Path, payload: bytes) -> None:
+    """Durably write raw bytes via a same-directory temp file + ``os.replace``.
+
+    The byte-level counterpart of :func:`atomic_write_json`. Use this when the
+    payload is already-serialized bytes that must be written verbatim (e.g.
+    snapshot restore), where re-encoding through ``json.dump`` would corrupt the
+    data. A mid-write crash leaves the original file untouched rather than a
+    truncated file, because the rename is the only mutation of ``path``.
+    """
+    path.parent.mkdir(parents=True, exist_ok=True)
+    fd, tmp_name = tempfile.mkstemp(dir=path.parent, prefix=f".{path.name}.", suffix=".tmp")
+    try:
+        with os.fdopen(fd, "wb") as handle:
+            handle.write(payload)
+        os.replace(tmp_name, path)
+    finally:
+        if os.path.exists(tmp_name):
+            os.unlink(tmp_name)
+
+
 def read_json(path: Path, default: object) -> object:
     if not path.exists():
         return default

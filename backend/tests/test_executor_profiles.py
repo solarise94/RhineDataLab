@@ -12,6 +12,7 @@ Covers the acceptance criteria from docs/19_noninteractive_cli_executor_compatib
 from __future__ import annotations
 
 import json
+import os
 import tempfile
 import unittest
 from pathlib import Path
@@ -848,16 +849,61 @@ class TestExecutorProfileResolution(unittest.TestCase):
             self.assertIn("reviewer=openai-gateway(openai_compatible)", str(ctx.exception.detail))
 
     def test_clearing_default_provider_key_clears_legacy_secret(self):
+        # Env isolation (audit KI-1): _effective_*_api_key falls back to the
+        # BLUEPRINT_DEEPSEEK_API_KEY env var as a legitimate config layer. That is
+        # intended behavior, but it means this "after clear, no key remains" assertion
+        # is only valid when the ambient env does not itself supply a key. Scrub the
+        # provider env vars for the duration so the test reflects config state alone,
+        # not whatever the developer happens to have exported. patch.dict restores
+        # the original environment (including the popped vars) on exit.
+        with patch.dict(os.environ, {}, clear=False):
+            for var in ("BLUEPRINT_DEEPSEEK_API_KEY", "ANTHROPIC_API_KEY", "OPENAI_API_KEY"):
+                os.environ.pop(var, None)
+            with tempfile.TemporaryDirectory() as tmp_dir:
+                settings = _make_settings(data_root=tmp_dir)
+                service = AppConfigService(settings)
+                service.update_settings({"deepseek_api_key": "sk-legacy"})
+
+                public = service.update_settings({"clear_api_provider_keys": ["deepseek"]})
+
+                deepseek = next(item for item in public["api_provider_profiles"] if item["provider_id"] == "deepseek")
+                self.assertFalse(deepseek["api_key_configured"])
+                self.assertIsNone(settings.deepseek_api_key)
+
+    def test_manager_agent_config_selected_provider_id_reflects_binding(self):
+        # Regression for the removed `or "deepseek"` mask (audit §3.1): selected_provider_id
+        # must echo the actually-bound provider, never silently relabel to the default.
         with tempfile.TemporaryDirectory() as tmp_dir:
             settings = _make_settings(data_root=tmp_dir)
             service = AppConfigService(settings)
-            service.update_settings({"deepseek_api_key": "sk-legacy"})
+            service.update_settings(
+                {
+                    "api_provider_profiles": [
+                        {
+                            "provider_id": "deepseek",
+                            "display_name": "DeepSeek",
+                            "protocol": "anthropic_compatible",
+                            "model": "deepseek-v4-flash",
+                            "base_url": "https://api.deepseek.com/anthropic",
+                        },
+                        {
+                            "provider_id": "anthropic-gateway",
+                            "display_name": "Anthropic Gateway",
+                            "protocol": "anthropic_compatible",
+                            "model": "manager-model",
+                            "base_url": "https://gateway.example.com/anthropic",
+                            "native_base_url": "https://gateway.example.com",
+                        },
+                    ],
+                    "api_provider_keys": {"anthropic-gateway": "sk-ant-gateway"},
+                    "provider_bindings": {"manager": {"provider_id": "anthropic-gateway"}},
+                }
+            )
 
-            public = service.update_settings({"clear_api_provider_keys": ["deepseek"]})
+            cfg = service.manager_agent_config()
 
-            deepseek = next(item for item in public["api_provider_profiles"] if item["provider_id"] == "deepseek")
-            self.assertFalse(deepseek["api_key_configured"])
-            self.assertIsNone(settings.deepseek_api_key)
+            self.assertEqual(cfg["selected_provider_id"], "anthropic-gateway")
+            self.assertNotEqual(cfg["selected_provider_id"], "deepseek")
 
     def test_saved_provider_list_does_not_append_default_openai(self):
         with tempfile.TemporaryDirectory() as tmp_dir:

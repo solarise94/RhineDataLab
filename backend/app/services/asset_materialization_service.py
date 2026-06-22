@@ -1,7 +1,25 @@
 from __future__ import annotations
 
-from app.models.graph import Asset, GraphState
+from dataclasses import dataclass, field
+
+from app.models.graph import ASSET_STATUS_RANK, Asset, GraphState
 from app.services.utils import utc_now
+
+
+@dataclass(frozen=True)
+class MaterializationBootstrapReport:
+    """Outcome of a legacy materialization bootstrap pass.
+
+    Lets callers distinguish a *clean* derivation (``ambiguous`` empty) from one
+    where bindings had to be *guessed* among several concrete assets sharing the
+    same planned alias. An ambiguous guess can bind a logical asset to the wrong
+    concrete asset, so callers should surface it rather than treat the derived
+    map as authoritative.
+    """
+
+    created: list[str] = field(default_factory=list)
+    ambiguous: list[dict] = field(default_factory=list)
+
 
 
 def _materializations(graph: GraphState) -> dict[str, dict]:
@@ -76,17 +94,48 @@ class AssetMaterializationService:
         }
 
     @staticmethod
-    def bootstrap_from_aliases(graph: GraphState, cards: list) -> None:
+    def bootstrap_from_aliases(graph: GraphState, cards: list) -> MaterializationBootstrapReport:
         """For legacy projects: build binding map from Asset.metadata['planned_asset_id'].
 
         Only populates bindings that are missing. Does not overwrite existing
-        explicit bindings. Should be called lazily when graph is loaded.
+        explicit bindings. Mutates the passed ``graph`` in-memory only; callers
+        decide whether to persist (a read must not persist — the binding map is
+        authoritatively written at run-accept via :meth:`set_current`).
+
+        Returns a :class:`MaterializationBootstrapReport` so callers can tell a
+        clean migration from one that had to guess among ambiguous candidates.
         """
         from app.models.cards import Card
 
+        report = MaterializationBootstrapReport()
         mats = _materializations(graph)
         asset_by_id = {asset.asset_id: asset for asset in graph.assets}
         run_order_by_id = {run.run_id: index for index, run in enumerate(graph.runs)}
+
+        def _bind(planned: str, candidates: list[Asset], card_id: str, role: str) -> None:
+            best = _pick_best_candidate(candidates, run_order_by_id=run_order_by_id)
+            if not best:
+                return
+            mats[planned] = {
+                "planned_asset_id": planned,
+                "current_asset_id": best.asset_id,
+                "producer_card_id": card_id,
+                "producer_role": role,
+                "producer_run_id": best.created_by_run or "",
+                "status": best.status,
+                "path": best.path,
+                "updated_at": utc_now(),
+                "superseded_asset_ids": [],
+            }
+            report.created.append(planned)
+            if len(candidates) > 1:
+                report.ambiguous.append(
+                    {
+                        "planned_asset_id": planned,
+                        "chosen_asset_id": best.asset_id,
+                        "candidate_asset_ids": [candidate.asset_id for candidate in candidates],
+                    }
+                )
 
         # Build reverse map: planned_asset_id -> list of concrete assets
         alias_assets: dict[str, list[Asset]] = {}
@@ -111,42 +160,13 @@ class AssetMaterializationService:
                     metadata = direct.metadata if isinstance(direct.metadata, dict) else {}
                     planned = str(metadata.get("planned_asset_id") or "").strip()
                     if planned and planned in alias_assets:
-                        # Find the best candidate for this planned id
-                        candidates = alias_assets[planned]
-                        best = _pick_best_candidate(candidates, run_order_by_id=run_order_by_id)
-                        if best:
-                            mats[planned] = {
-                                "planned_asset_id": planned,
-                                "current_asset_id": best.asset_id,
-                                "producer_card_id": card.card_id,
-                                "producer_role": output.role,
-                                "producer_run_id": best.created_by_run or "",
-                                "status": best.status,
-                                "path": best.path,
-                                "updated_at": utc_now(),
-                                "superseded_asset_ids": [],
-                            }
+                        _bind(planned, alias_assets[planned], card.card_id, output.role)
                 else:
                     # output.asset_id is a logical id with alias candidates
                     candidates = alias_assets.get(output.asset_id, [])
                     if candidates:
-                        best = _pick_best_candidate(candidates, run_order_by_id=run_order_by_id)
-                        if best:
-                            mats[output.asset_id] = {
-                                "planned_asset_id": output.asset_id,
-                                "current_asset_id": best.asset_id,
-                                "producer_card_id": card.card_id,
-                                "producer_role": output.role,
-                                "producer_run_id": best.created_by_run or "",
-                                "status": best.status,
-                                "path": best.path,
-                                "updated_at": utc_now(),
-                                "superseded_asset_ids": [],
-                            }
-        # Mark as bootstrapped so empty projects don't repeatedly save.
-        if graph.metadata is None:
-            graph.metadata = {}
-        graph.metadata["asset_materializations_bootstrapped_at"] = utc_now()
+                        _bind(output.asset_id, candidates, card.card_id, output.role)
+        return report
 
     @staticmethod
     def resolve_logical_output(
@@ -183,12 +203,11 @@ def _pick_best_candidate(candidates: list[Asset], *, run_order_by_id: dict[str, 
     """
     if not candidates:
         return None
-    status_rank = {"valid": 0, "candidate": 1, "stale": 2, "superseded": 3, "rejected": 4, "archived": 5, "missing": 6}
     run_order = run_order_by_id or {}
 
     def sort_key(asset: Asset) -> tuple[int, int]:
         return (
-            status_rank.get(asset.status, 99),
+            ASSET_STATUS_RANK.get(asset.status, 99),
             -(run_order.get(asset.created_by_run or "", -1)),  # newest run first
         )
 

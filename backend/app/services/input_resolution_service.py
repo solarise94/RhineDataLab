@@ -3,12 +3,9 @@ from __future__ import annotations
 from dataclasses import dataclass
 
 from app.models.cards import Card
-from app.models.graph import Asset, GraphState
+from app.models.graph import ASSET_STATUS_RANK, VALID_INPUT_ASSET_STATUSES, Asset, GraphState
 from app.services.asset_materialization_service import AssetMaterializationService
 from app.services.asset_timeline_service import AssetTimelineService
-
-
-VALID_LAUNCHABLE_INPUT_STATUSES = {"valid", "candidate"}
 
 
 @dataclass(frozen=True)
@@ -269,7 +266,6 @@ class InputResolutionService:
         preferred_card_id: str | None,
         preferred_role: str | None,
     ) -> list[Asset]:
-        status_rank = {"valid": 0, "candidate": 1, "stale": 2, "superseded": 3, "rejected": 4, "archived": 5, "missing": 6}
 
         def sort_key(asset: Asset) -> tuple[int, int, int]:
             metadata = asset.metadata if isinstance(asset.metadata, dict) else {}
@@ -280,7 +276,7 @@ class InputResolutionService:
             if preferred_card_id and asset.created_by_run and run_card_by_id.get(asset.created_by_run or "") == preferred_card_id:
                 producer_match -= 1
             return (
-                status_rank.get(asset.status, 99),
+                ASSET_STATUS_RANK.get(asset.status, 99),
                 producer_match,
                 -run_order_by_id.get(asset.created_by_run or "", -1),
             )

@@ -5,7 +5,7 @@ from hashlib import sha256
 from typing import Any
 
 from app.models.cards import Card
-from app.models.graph import Asset, GraphState, RunRecord
+from app.models.graph import ASSET_STATUS_RANK, VALID_INPUT_ASSET_STATUSES, Asset, GraphState, RunRecord
 from app.services.asset_materialization_service import AssetMaterializationService
 from app.services.input_resolution_service import InputResolutionService
 
@@ -13,7 +13,6 @@ from app.services.input_resolution_service import InputResolutionService
 class DependencyAttentionService:
     """Derive dependency attention issues from the current project snapshot."""
 
-    VALID_INPUT_STATUSES = {"valid", "candidate"}
     ERROR_INPUT_STATUSES = {"rejected", "archived", "missing"}
     INACTIVE_PRODUCER_CARD_STATUSES = {"cancelled", "rejected", "superseded"}
     ATTENTION_INPUT_ELIGIBLE_STATUSES = {"accepted", "failed", "stale", "needs_review", "superseded"}
@@ -220,10 +219,9 @@ class DependencyAttentionService:
                 if concrete is None:
                     candidates = alias_assets_by_planned_id.get(logical_id, [])
                     if candidates:
-                        status_rank = {"valid": 0, "candidate": 1, "stale": 2, "superseded": 3, "rejected": 4, "archived": 5, "missing": 6}
                         def _sort_key(a: Asset) -> tuple[int, int]:
                             return (
-                                status_rank.get(a.status, 99),
+                                ASSET_STATUS_RANK.get(a.status, 99),
                                 -(run_order_by_id.get(a.created_by_run or "", -1)),
                             )
                         best = sorted(candidates, key=_sort_key)[0]
@@ -338,7 +336,7 @@ class DependencyAttentionService:
                 )
                 continue
 
-            if asset.status not in self.VALID_INPUT_STATUSES:
+            if asset.status not in VALID_INPUT_ASSET_STATUSES:
                 issues.append(
                     self._issue(
                         kind="input_asset_not_valid",
@@ -414,7 +412,7 @@ class DependencyAttentionService:
                         current_asset_from_binding
                         and not resolution.is_virtual
                         and current_asset_from_binding.asset_id != asset.asset_id
-                        and current_asset_from_binding.status in self.VALID_INPUT_STATUSES
+                        and current_asset_from_binding.status in VALID_INPUT_ASSET_STATUSES
                     ):
                         issues.append(
                             self._issue(
@@ -594,7 +592,7 @@ class DependencyAttentionService:
             if upstream is None:
                 invalid.append({"asset_id": upstream_id, "status": "missing"})
                 continue
-            if upstream.status not in self.VALID_INPUT_STATUSES:
+            if upstream.status not in VALID_INPUT_ASSET_STATUSES:
                 invalid.append({"asset_id": upstream.asset_id, "status": upstream.status})
                 continue
             queue.extend(upstream.depends_on)

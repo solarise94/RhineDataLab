@@ -3,10 +3,10 @@ from __future__ import annotations
 from typing import Any
 
 from app.models.cards import Card
-from app.models.graph import Asset, GraphState, Module, RunRecord
+from app.models.graph import VALID_INPUT_ASSET_STATUSES, Asset, GraphState, Module, RunRecord
 from app.services.asset_timeline_service import AssetTimelineService
 from app.services.dependency_attention_service import DependencyAttentionService
-from app.services.input_resolution_service import InputResolutionService, VALID_LAUNCHABLE_INPUT_STATUSES
+from app.services.input_resolution_service import InputResolutionService
 from app.services.project_service import ProjectService
 from app.services.runtime_dependency_state_service import ACTIVE_RUNTIME_DEPENDENCY_JOB_STATUSES, dependency_blockers_by_card
 
@@ -76,7 +76,7 @@ class FlowService:
             nonvalid_asset_ids = [
                 item.resolved_asset_id or item.requested_asset_id
                 for item in input_resolutions
-                if item.resolved_asset_id is not None and item.status not in VALID_LAUNCHABLE_INPUT_STATUSES
+                if item.resolved_asset_id is not None and item.status not in VALID_INPUT_ASSET_STATUSES
             ]
             unmet_dependency_ids = [
                 dep_id

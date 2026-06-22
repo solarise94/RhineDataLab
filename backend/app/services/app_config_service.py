@@ -16,12 +16,16 @@ from app.core.config import Settings, get_settings
 from app.models.executor_profiles import default_profiles
 
 API_PROVIDER_PROTOCOLS = {"anthropic_compatible", "openai_compatible"}
+# Single source of truth for the system's default API provider. Keep this in sync
+# with the Node sidecar's DEFAULT_PROVIDER_ID (manager-agent/src/server.js): the two
+# runtimes each hold their own literal, so a default-provider change must touch both.
+DEFAULT_PROVIDER_ID = "deepseek"
 DEFAULT_PROVIDER_BINDINGS = {
-    "manager": {"provider_id": "deepseek"},
-    "reviewer": {"provider_id": "deepseek"},
-    "pi_executor": {"provider_id": "deepseek"},
-    "opencode_executor": {"provider_id": "deepseek"},
-    "library_summarizer": {"provider_id": "deepseek"},
+    "manager": {"provider_id": DEFAULT_PROVIDER_ID},
+    "reviewer": {"provider_id": DEFAULT_PROVIDER_ID},
+    "pi_executor": {"provider_id": DEFAULT_PROVIDER_ID},
+    "opencode_executor": {"provider_id": DEFAULT_PROVIDER_ID},
+    "library_summarizer": {"provider_id": DEFAULT_PROVIDER_ID},
 }
 ROLE_PROVIDER_PROTOCOLS = {
     # These roles use Anthropic Messages-compatible requests in the backend today.
@@ -227,8 +231,12 @@ class AppConfigService:
         payload = {
             # The Node sidecar resolves providers through pi-ai's provider registry; keep the
             # runtime provider stable and pass custom endpoints through base URLs.
-            "provider": os.environ.get("MANAGER_AGENT_PROVIDER") or "deepseek",
-            "selected_provider_id": manager_provider.get("provider_id") or "deepseek",
+            "provider": os.environ.get("MANAGER_AGENT_PROVIDER") or DEFAULT_PROVIDER_ID,
+            # manager_provider came from _require_api_provider, which only returns a
+            # sanitized profile (always carrying a non-empty provider_id) or raises.
+            # So no "or DEFAULT_PROVIDER_ID" fallback here: a missing id would be an
+            # invariant violation we want to surface, not silently relabel as deepseek.
+            "selected_provider_id": manager_provider["provider_id"],
             "provider_protocol": manager_provider.get("protocol"),
             "model": str(manager_provider.get("model") or config.get("manager_model") or self.settings.manager_model),
             "deepseek_api_base_url": base_url,

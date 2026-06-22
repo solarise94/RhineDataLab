@@ -2,6 +2,7 @@ from fastapi import APIRouter, Depends
 from fastapi.responses import FileResponse
 
 from app.api.deps import get_project_service, get_result_asset_service
+from app.models.graph import VALID_INPUT_ASSET_STATUSES
 from app.services.project_service import ProjectService
 from app.services.result_asset_service import ResultAssetService
 
@@ -15,7 +16,7 @@ def get_results(project_id: str, project_service: ProjectService = Depends(get_p
     return {
         "accepted": [asset for asset in assets if asset.status == "valid"],
         "candidate": [asset for asset in assets if asset.status == "candidate"],
-        "other": [asset for asset in assets if asset.status not in {"valid", "candidate"}],
+        "other": [asset for asset in assets if asset.status not in VALID_INPUT_ASSET_STATUSES],
     }
 
 

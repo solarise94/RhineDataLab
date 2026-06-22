@@ -35,7 +35,7 @@ from app.models.card_blueprint import (
 )
 from app.models.cards import Card, CardAssetRef
 from app.models.executor import ExecutorContext, ExecutorReference, RuntimeBindings
-from app.models.graph import Asset, GraphState
+from app.models.graph import VALID_INPUT_ASSET_STATUSES, Asset, GraphState
 from app.models.output_contracts import CardOutputSpec, normalize_output_format
 from app.services.asset_materialization_service import AssetMaterializationService
 from app.services.project_service import ProjectService
@@ -66,8 +66,6 @@ _ASSET_ID_PATTERN = re.compile(r"\bsha256:[a-f0-9]{64}\b", re.I)
 
 _SECRET_PATTERN = re.compile(r"(key|token|password|secret|credential)", re.I)
 
-# Asset statuses that are safe to bind as card inputs.
-_VALID_INPUT_STATUSES = {"valid", "candidate"}
 
 
 def _scrub_text(text: str) -> str:
@@ -1062,7 +1060,7 @@ class CardLibraryService:
                     f"Bound input '{inp_schema.label}' (slot: {inp_schema.slot}) references unknown asset '{asset_id}'."
                 )
                 continue
-            if asset.status not in _VALID_INPUT_STATUSES:
+            if asset.status not in VALID_INPUT_ASSET_STATUSES:
                 blockers.append(
                     f"Bound input '{inp_schema.label}' (slot: {inp_schema.slot}) asset '{asset_id}' has unusable status '{asset.status}'."
                 )

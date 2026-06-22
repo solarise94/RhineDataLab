@@ -949,6 +949,56 @@ def _run_provider_with_repair_loop(
     return return_code
 
 
+class _SetupFailure(Exception):
+    """Raised when pre-launch setup (profile / settings / renderer) fails fatally.
+
+    A structured terminal failure report is written *before* raising, so the
+    backend surfaces a specific reason_code / summary (e.g. "Executor profile X
+    could not be loaded") instead of collapsing the run into a generic
+    "executor exit code N" with only a stdout tail. Caught at the single call
+    site in main(), which returns ``exit_code``.
+    """
+
+    def __init__(self, summary: str, *, exit_code: int = 2) -> None:
+        super().__init__(summary)
+        self.exit_code = exit_code
+
+
+def _write_setup_failure(
+    *,
+    run_dir: Path,
+    run_id: str,
+    summary: str,
+    reason_code: str = "execution_error",
+    details: dict[str, Any] | None = None,
+) -> None:
+    """Write executor_failure.json + terminal_report.json (synthetic_failure).
+
+    Mirrors command_worker's terminal-report contract so worker_service reads a
+    specific failure reason rather than synthesizing a generic exit-code error.
+    """
+    from app.models.runs import ExecutorFailureReport, TerminalReport
+
+    failure = ExecutorFailureReport(
+        schema_version="executor_failure.v1",
+        reason_code=reason_code,
+        summary=summary,
+        details=details or {},
+    )
+    atomic_write_json(run_dir / "executor_failure.json", failure.model_dump())
+    report = TerminalReport(
+        schema_version="executor_terminal_report.v1",
+        run_id=run_id,
+        terminal_kind="synthetic_failure",
+        accepted_at=_utc_now(),
+        summary=summary,
+        reason_code=reason_code,
+        status="failed",
+        failure_report_path="executor_failure.json",
+    )
+    atomic_write_json(run_dir / "terminal_report.json", report.model_dump(exclude_none=True))
+
+
 def _try_render_provider(
     *,
     provider: str,
@@ -962,6 +1012,14 @@ def _try_render_provider(
 
     Returns a tuple of (ProviderRenderResult, renderer, profile_spec, settings) if a renderer is available.
     Returns (None, None, None, None) otherwise.
+
+    Setup errors are NOT swallowed into a fabricated profile or a stdout-only
+    print. An explicitly-requested profile that fails to load, a failed settings
+    load, or a renderer that raises each write a structured terminal failure and
+    raise :class:`_SetupFailure` so the backend reports the specific cause. A
+    *genuinely* empty profile lookup (no stored profile, no matching builtin
+    default, and no error) still falls back to a minimal fabricated spec — the
+    legitimate cli_native path.
     """
     if not auth_mode:
         return None, None, None, None
@@ -976,6 +1034,8 @@ def _try_render_provider(
     if renderer is None:
         return None, None, None, None
 
+    run_id = str((packet or {}).get("task_id") or run_dir.name)
+
     profile_spec = None
     try:
         from app.services.app_config_service import AppConfigService
@@ -984,8 +1044,26 @@ def _try_render_provider(
         stored = config_service.resolve_executor_profile(provider, profile_id=profile_id)
         if stored:
             profile_spec = ExecutorProfileSpec(**stored)
-    except Exception:
-        pass
+    except Exception as exc:
+        # An explicitly-requested profile that fails to load is a hard config
+        # error: do NOT fabricate a fake profile over it (that would mask the
+        # real cause and resurface later as a generic provider 401 / exit code).
+        # With no explicit profile_id we have nothing specific to honour, so we
+        # record the error and fall through to the default/fabricate path.
+        if profile_id:
+            summary = (
+                f"Executor profile '{profile_id}' could not be loaded for "
+                f"provider={provider}: {exc}"
+            )
+            print(f"[wrapper] {summary}", flush=True)
+            _write_setup_failure(
+                run_dir=run_dir,
+                run_id=run_id,
+                summary=summary,
+                details={"provider": provider, "profile_id": profile_id, "phase": "profile_resolution"},
+            )
+            raise _SetupFailure(summary)
+        print(f"[wrapper] executor profile lookup failed for provider={provider}: {exc}", flush=True)
 
     if profile_spec is None:
         try:
@@ -995,8 +1073,8 @@ def _try_render_provider(
                 (p for p in defaults if p.worker_type == provider and p.auth_mode == auth_mode),
                 None,
             )
-        except Exception:
-            pass
+        except Exception as exc:
+            print(f"[wrapper] default profile lookup failed for provider={provider}: {exc}", flush=True)
 
     if profile_spec is None:
         profile_spec = ExecutorProfileSpec(
@@ -1008,12 +1086,19 @@ def _try_render_provider(
 
     prompt_path = run_dir / "executor_prompt.md"
 
-    settings = None
     try:
         from app.core.config import get_settings
         settings = get_settings()
-    except Exception:
-        pass
+    except Exception as exc:
+        summary = f"Failed to load settings while preparing provider={provider}: {exc}"
+        print(f"[wrapper] {summary}", flush=True)
+        _write_setup_failure(
+            run_dir=run_dir,
+            run_id=run_id,
+            summary=summary,
+            details={"provider": provider, "phase": "settings_load"},
+        )
+        raise _SetupFailure(summary)
 
     try:
         result = renderer.render(
@@ -1026,8 +1111,18 @@ def _try_render_provider(
             packet=packet,
         )
     except Exception as exc:
-        print(f"[wrapper] renderer failed for provider={provider}: {exc}", flush=True)
-        return None, renderer, profile_spec, settings
+        # A renderer that raises is a real setup failure, not a reason to
+        # silently degrade to the legacy template launch (which would hide the
+        # root cause behind a generic execution error).
+        summary = f"Provider renderer failed for provider={provider}: {exc}"
+        print(f"[wrapper] {summary}", flush=True)
+        _write_setup_failure(
+            run_dir=run_dir,
+            run_id=run_id,
+            summary=summary,
+            details={"provider": provider, "profile_id": profile_id, "phase": "render"},
+        )
+        raise _SetupFailure(summary)
 
     try:
         result.write_provider_config_plan(run_dir)
@@ -1152,14 +1247,19 @@ def main() -> int:
     packet = _load_task_packet(packet_path)
     started = time.monotonic()
 
-    renderer_result, renderer, profile_spec, settings = _try_render_provider(
-        provider=provider,
-        auth_mode=auth_mode,
-        profile_id=profile_id,
-        packet=packet,
-        run_dir=run_dir,
-        project_root=project_root,
-    )
+    try:
+        renderer_result, renderer, profile_spec, settings = _try_render_provider(
+            provider=provider,
+            auth_mode=auth_mode,
+            profile_id=profile_id,
+            packet=packet,
+            run_dir=run_dir,
+            project_root=project_root,
+        )
+    except _SetupFailure as exc:
+        # Structured terminal failure already written; the backend will surface
+        # the specific reason. Exit non-zero so the run is treated as failed.
+        return exc.exit_code
 
     if renderer_result and renderer_result.unsupported_error:
         print(f"[wrapper] renderer unsupported for provider={provider}: {renderer_result.unsupported_error}", flush=True)

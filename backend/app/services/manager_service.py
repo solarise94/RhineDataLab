@@ -9,6 +9,7 @@ from collections import deque
 from urllib import error, request as url_request
 
 from app.models.chat import ChatAction, ChatRequest, ChatResponse
+from app.models.graph import VALID_INPUT_ASSET_STATUSES
 from app.models.patches import GraphPatch, Proposal
 from app.core.config import get_settings
 from app.services.app_config_service import AppConfigService
@@ -544,7 +545,7 @@ class ManagerService:
                             "producer_source": producer_sources.get(asset_id),
                         }
                     )
-                elif asset_id in existing_assets and existing_assets[asset_id].status in {"valid", "candidate"}:
+                elif asset_id in existing_assets and existing_assets[asset_id].status in VALID_INPUT_ASSET_STATUSES:
                     assets_report.append(
                         {
                             "label": label,

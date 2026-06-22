@@ -25,7 +25,7 @@ from app.core.paths import (
 )
 from app.models.cards import Card, CardAssetRef
 from app.models.executor import ExecutorContext, ExecutorReference
-from app.models.graph import Asset, Claim, GraphState, Module, ModuleRef, ReportItem
+from app.models.graph import ACTIVE_RUN_STATUSES, Asset, Claim, GraphState, Module, ModuleRef, ReportItem
 from app.models.output_contracts import CardOutputSpec
 from app.models.project import (
     DataDirectoryMount,
@@ -442,8 +442,7 @@ class ProjectService:
         with lock:
             store = self.graph_store(project_id)
             graph = store.load_graph()
-            active_statuses = {"queued", "launching", "needs_approval", "running", "reviewing"}
-            active_runs = [run for run in graph.runs if run.status in active_statuses]
+            active_runs = [run for run in graph.runs if run.status in ACTIVE_RUN_STATUSES]
             if active_runs:
                 raise HTTPException(
                     status_code=409,
@@ -951,10 +950,17 @@ class ProjectService:
         graph = store.load_graph()
         # Lazy bootstrap materialization bindings for legacy projects
         metadata = graph.metadata if isinstance(graph.metadata, dict) else {}
-        needs_bootstrap = not metadata.get("asset_materializations") and not metadata.get("asset_materializations_bootstrapped_at")
+        # No persisted binding map -> derive it in-memory below. There is no
+        # "bootstrapped" marker: reads never persist, so legacy bindings are
+        # re-derived on every read (cheap, deterministic) until run-accept writes
+        # the authoritative map.
+        needs_bootstrap = not metadata.get("asset_materializations")
         if needs_bootstrap:
+            # Derive legacy bindings in-memory for this response only. A read
+            # must not mutate persisted state (idempotency); the binding map is
+            # authoritatively persisted at run-accept. Consumers re-derive from
+            # Asset.metadata["planned_asset_id"], so an unpersisted read is safe.
             AssetMaterializationService.bootstrap_from_aliases(graph, cards)
-            store.save_graph(graph)
         summary = ProjectSummary(
             **project.model_dump(),
             card_counts=self._count_by(cards, "status"),
@@ -981,10 +987,17 @@ class ProjectService:
         cards = store.load_cards()
         graph = store.load_graph()
         metadata = graph.metadata if isinstance(graph.metadata, dict) else {}
-        needs_bootstrap = not metadata.get("asset_materializations") and not metadata.get("asset_materializations_bootstrapped_at")
+        # No persisted binding map -> derive it in-memory below. There is no
+        # "bootstrapped" marker: reads never persist, so legacy bindings are
+        # re-derived on every read (cheap, deterministic) until run-accept writes
+        # the authoritative map.
+        needs_bootstrap = not metadata.get("asset_materializations")
         if needs_bootstrap:
+            # Derive legacy bindings in-memory for this response only. A read
+            # must not mutate persisted state (idempotency); the binding map is
+            # authoritatively persisted at run-accept. Consumers re-derive from
+            # Asset.metadata["planned_asset_id"], so an unpersisted read is safe.
             AssetMaterializationService.bootstrap_from_aliases(graph, cards)
-            store.save_graph(graph)
         summary = ProjectSummary(
             **project.model_dump(),
             card_counts=self._count_by(cards, "status"),
