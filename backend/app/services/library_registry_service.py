@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import fcntl
 import json
+import logging
 import math
 import re
 import shutil
@@ -19,7 +20,21 @@ from app.services.project_service import ProjectService
 from app.services.utils import atomic_write_json, read_json, sha256_file, utc_now
 
 
+logger = logging.getLogger(__name__)
+
 WORD_RE = re.compile(r"[a-z0-9_+\-/.]{2,}", re.I)
+
+
+class LibraryRegistryError(RuntimeError):
+    """Raised when a registry file exists on disk but cannot be parsed/validated.
+
+    This exists to keep the two "empties" distinct (docs/67 §4.1b): a *missing*
+    registry file is a legitimate bootstrap state (return ``[]``), whereas a file
+    that exists but is corrupt/schema-mismatched is an error that must never be
+    silently coerced into an empty registry — doing so let a write-back path
+    overwrite the whole table with only the new entry, and let a corrupt read
+    trigger a destructive full-rescan overwrite.
+    """
 
 
 class LibrarySummaryPayload(BaseModel):
@@ -223,21 +238,63 @@ class LibraryRegistryService:
 
     def _ensure_registry(self, kind: LibraryKind) -> LibraryRegistry:
         path = self._registry_path(kind)
-        payload = read_json(path, {})
+        if path.exists():
+            # The file exists, so it MUST parse. A corrupt or schema-mismatched
+            # registry must never be silently coerced into an empty one: that
+            # conflates "corrupt" with "genuinely empty" and falls into the
+            # rebuild branch below, overwriting on-disk state from a (possibly
+            # partial) disk scan — silently erasing entries whose sources happen
+            # to be unreachable right now (docs/67 §4.1b data loss). Quarantine
+            # the bad file (preserved for forensics), alert, then rebuild.
+            registry: LibraryRegistry | None = None
+            try:
+                registry = LibraryRegistry.model_validate(read_json(path, {}))
+                if registry.kind != kind:
+                    raise LibraryRegistryError(
+                        f"{kind} registry kind mismatch: found {registry.kind!r}"
+                    )
+            except Exception as exc:
+                self._quarantine_corrupt_registry(kind, path, exc)
+                registry = None
+            if registry is not None and registry.items:
+                return registry
+            # Valid registry with no items (legitimate empty) or just-quarantined:
+            # fall through and (re)build authoritatively from disk sources.
+        refresh = self.refresh_entries(kind, force=False)
+        return LibraryRegistry.model_validate(
+            {
+                "kind": kind,
+                "items": refresh["items"],
+                "updated_at": refresh["updated_at"],
+            }
+        )
+
+    def _quarantine_corrupt_registry(self, kind: LibraryKind, path: Path, exc: Exception) -> None:
+        """Move a corrupt/unreadable registry aside so the rebuild that follows
+        cannot silently erase it, and alert via the module logger.
+
+        The backup is kept only for forensic recovery; the authoritative state
+        after this call is whatever the disk rescan rebuilds. A unique
+        timestamp+uuid suffix avoids clobbering earlier backups.
+        """
+        import uuid
+
+        safe_ts = utc_now().replace(":", "").replace("-", "")
+        backup: Path | None = path.with_name(f"{path.name}.corrupt-{safe_ts}-{uuid.uuid4().hex[:8]}.bak")
         try:
-            registry = LibraryRegistry.model_validate(payload)
-        except Exception:
-            registry = LibraryRegistry(kind=kind, items=[], updated_at=None)
-        if registry.kind != kind or not registry.items:
-            refresh = self.refresh_entries(kind, force=False)
-            registry = LibraryRegistry.model_validate(
-                {
-                    "kind": kind,
-                    "items": refresh["items"],
-                    "updated_at": refresh["updated_at"],
-                }
-            )
-        return registry
+            path.rename(backup)
+        except OSError:
+            # Already gone (concurrent quarantine) or rename refused; the rebuild
+            # will overwrite it regardless. Surface it rather than hide it.
+            logger.exception("Failed to quarantine corrupt %s registry at %s", kind, path)
+            backup = None
+        logger.error(
+            "Library %s registry at %s is unreadable (%s); quarantined to %s and rebuilding from disk sources.",
+            kind,
+            path,
+            exc,
+            backup if backup is not None else "<rename failed>",
+        )
 
     def _write_registry(self, registry: LibraryRegistry) -> None:
         atomic_write_json(self._registry_path(registry.kind), registry.model_dump())
@@ -343,6 +400,12 @@ class LibraryRegistryService:
     def _add_or_replace_entry(self, kind: LibraryKind, entry: LibraryEntry) -> None:
         """Insert or update a single entry in the registry without re-scanning disk."""
         with self._registry_lock(kind):
+            # Strict load on purpose: if the registry exists but is corrupt,
+            # _load_registry_items raises rather than returning [] — otherwise we
+            # would persist only `entry` and erase every existing entry
+            # (docs/67 §4.1b). The corrupt file is left untouched (no destructive
+            # write) and self-heals via _ensure_registry's quarantine+rebuild on
+            # the next read.
             items = self._load_registry_items(kind)
             by_id = {item.id: item for item in items}
             by_id[entry.id] = entry
@@ -416,7 +479,7 @@ class LibraryRegistryService:
         )
 
     def _build_skill_entries(self, *, force: bool) -> list[LibraryEntry]:
-        previous = self._load_registry_items("skill")
+        previous = self._load_cached_entries("skill")
         previous_by_id = {item.id: item for item in previous}
         entries: list[LibraryEntry] = []
         seen: set[str] = set()
@@ -467,7 +530,7 @@ class LibraryRegistryService:
         return entries
 
     def _build_mcp_entries(self, *, force: bool) -> list[LibraryEntry]:
-        previous = self._load_registry_items("mcp")
+        previous = self._load_cached_entries("mcp")
         previous_by_id = {item.id: item for item in previous}
         entries: list[LibraryEntry] = []
         seen: set[str] = set()
@@ -587,12 +650,47 @@ class LibraryRegistryService:
         }
 
     def _load_registry_items(self, kind: LibraryKind) -> list[LibraryEntry]:
-        payload = read_json(self._registry_path(kind), {})
-        try:
-            registry = LibraryRegistry.model_validate(payload)
-        except Exception:
+        """Load persisted entries for write-back/read paths (e.g. ``_add_or_replace_entry``).
+
+        Distinguishes the two empties the original code conflated (docs/67 §4.1b):
+        - file MISSING -> ``[]`` (legitimate bootstrap; nothing persisted yet)
+        - file EXISTS but unparseable / wrong-kind -> raise ``LibraryRegistryError``.
+          Never silently ``[]`` here: a write-back caller would then persist only
+          its new entry, overwriting and erasing every existing entry.
+        """
+        path = self._registry_path(kind)
+        if not path.exists():
             return []
-        return registry.items if registry.kind == kind else []
+        try:
+            registry = LibraryRegistry.model_validate(read_json(path, {}))
+        except Exception as exc:
+            raise LibraryRegistryError(
+                f"{kind} registry at {path} exists but is unreadable: {exc}"
+            ) from exc
+        if registry.kind != kind:
+            raise LibraryRegistryError(
+                f"{kind} registry at {path} has mismatched kind {registry.kind!r}"
+            )
+        return registry.items
+
+    def _load_cached_entries(self, kind: LibraryKind) -> list[LibraryEntry]:
+        """Best-effort load of the previous registry for summary-cache reuse
+        during a full rebuild.
+
+        Unlike :meth:`_load_registry_items`, a corrupt previous registry is
+        harmless here: the rebuild overwrites it from disk anyway, so it degrades
+        to a cache miss (re-summarize) rather than aborting the rebuild. This is
+        what lets ``refresh_entries`` recover a corrupt registry instead of
+        propagating the parse error.
+        """
+        try:
+            return self._load_registry_items(kind)
+        except LibraryRegistryError:
+            logger.warning(
+                "Previous %s registry unreadable during rebuild; ignoring summary cache.",
+                kind,
+            )
+            return []
 
     def _app_installed_capabilities_root(self, kind: LibraryKind) -> Path:
         return Path(self.settings.data_root) / "_system" / "capabilities" / ("skills" if kind == "skill" else "mcp")

@@ -488,7 +488,7 @@ skill 都报"not found" blocker。用户被通知"已安装的技能缺失"，�
 才落入 `except → []`；而那条路径的真正后果是 `_add_or_replace_entry` 静默丢失既有条目。
 故 `:593` 不在 #4（展示层）范围，归入 §4.1b（存储层）。
 
-### 4.1b [HIGH] `_ensure_registry` 损坏输入触发全盘覆盖写（数据丢失）
+### 4.1b [HIGH] `_ensure_registry` 损坏输入触发全盘覆盖写（数据丢失）✅ 已完成
 
 `backend/app/services/library_registry_service.py:224-240`（`_ensure_registry`）
 + `:589-595`（`_load_registry_items`）+ `:242,123`（`_write_registry` / `refresh_entries`）
@@ -521,6 +521,43 @@ def _ensure_registry(self, kind):
 `_load_registry_items` 应区分"文件缺失（合法 bootstrap，返回 `[]`）"与"存在但不可解析（raise）"；
 并核查 `refresh_entries`/`_build_*_entries` 在损坏输入下的行为、补 install/register 流程测试。
 **风险更高**（动整条 scan-rebuild 链 + 三处写入点），需单独排期、单独评审。
+
+#### ✅ 已修复（§4.1b，2026-06-22）
+
+`library_registry_service` 把"文件缺失（合法空）"与"文件存在但不可解析（出错空）"彻底分开，
+损坏输入不再静默变空、不再触发覆盖写。核心改动（保持 surgical，复用现有 pattern）：
+
+- **新增 `LibraryRegistryError(RuntimeError)` + 模块 `logger`**（此前该文件无 logger，沿用
+  `package_service` #4 的 `logging.getLogger(__name__)` pattern）。异常类是"出错空"的显式信号，
+  让调用方能区分它与合法空。
+- **`_load_registry_items`（写回/读取路径）**：`文件缺失 → []`（合法 bootstrap），
+  `文件存在但 char 损坏/schema 不符/kind 不符 → raise LibraryRegistryError`。**绝不再静默 `[]`**——
+  这正是 `_add_or_replace_entry`（install/register 三处写入点）此前用"仅新条目"覆盖整张表的根因。
+  现在损坏时它 raise、**不写**，损坏文件原样保留（不被破坏性覆盖），靠下方 `_ensure_registry`
+  的 quarantine+rebuild 在下次读时自愈。
+- **`_ensure_registry`（读路径）走显式 repair 分支**：文件存在但不可解析（含 kind 不符）→
+  `_quarantine_corrupt_registry`（把损坏文件改名为 `*.corrupt-<ts>-<uuid8>.bak` 备份 +
+  `logger.error` 结构化告警）+ 重建。**关键是把"损坏"与"合法空"在 `not items` 判定之前分开**：
+  合法的"文件存在但 items 空"仍走重扫（首次 bootstrap 语义不变），唯独损坏先备份再重建。
+  备份名带 timestamp+uuid8，杜绝覆盖既有备份；rename 竞态/失败被 catch 并告警（重建仍会兜底）。
+- **`refresh_entries`/`_build_*_entries` 在损坏输入下的行为**（核查结论）：二者读旧注册表仅作
+  **摘要缓存**复用。新增 `_load_cached_entries`（best-effort：损坏 → 缓存未命中 `[]` + warning，
+  **不 raise**），`_build_skill_entries`/`_build_mcp_entries` 改用它。这样 force-refresh 在损坏
+  注册表上仍能从磁盘源**恢复**（重扫覆盖损坏），而不是被解析错击穿——既满足"出错不静默"，
+  又保留 refresh 作为显式重建/修复手段的语义。`resummarize_entry` 因先调 `_ensure_registry`
+  （已自愈）再在锁内 `_load_registry_items`，路径同样安全。
+
+**新增测试** `backend/tests/test_library_registry.py::TestLibraryRegistryCorruptionSafety`（9 例，
+隔离 `skill_roots=[]/mcp_roots=[]` 避免 home 目录技能污染）：(a) 文件缺失→`[]`/`_ensure_registry`
+合法空且不 quarantine；(b) char 损坏/schema 不符/kind 不符→raise；(c) 损坏读 quarantine+rebuild
+不抹既有条目、备份含原始损坏字节、live 文件已重建、多条目损坏后全部恢复、install 在损坏注册表上
+raise 且**不覆盖**损坏文件（断言文件字节未变）；(d) force-refresh 从损坏 previous 恢复。
+
+**全量回归**：`PYTHONPATH=backend .venv/backend/bin/python -m unittest discover -s backend/tests`
+**569 全绿**（含原 16 例 install/register 安全测试与 `test_package_capabilities` #4 用例，均不回归）。
+
+**与修复原则对应**：满足"区分正常空与出错空"（缺失 vs 不可解析）、"读操作不写"的精神
+（损坏读改为 quarantine 独立备份 + 告警，不在正常读路径静默改持久化表）、"出错显式而非空集"。
 
 ### 4.2 [HIGH] executor profile 解析失败 → 编造假 profile
 
@@ -864,7 +901,7 @@ item_id = str(payload.get("tool_call_id") or self._last_matching_tool_id(...) or
 
 ## 修复优先级建议
 
-按"掩盖的 bug 危害 × 用户触达频率"排序，**先修这 10 个**：
+按"掩盖的 bug 危害 × 用户触达频率"排序，**先修这 10 个**（外加 §4.1b 追加 HIGH 收尾）：
 
 1. **1.3** `patch_apply.py:319` — 半恢复 graph 损坏 + 非原子写入（数据丢失级，补测试）✅ 已完成
 2. **1.1** `bootstrap_from_aliases` 读改写 + 启发式绑定（与 docs/66 依赖链直接相关）✅ 已完成
@@ -876,9 +913,9 @@ item_id = str(payload.get("tool_call_id") or self._last_matching_tool_id(...) or
 8. **3.1** 全角色默认 deepseek（配置错误表现为功能 bug，Python + JS 两侧）✅ 已完成（不改产品默认 deepseek；集中 `DEFAULT_PROVIDER_ID` 常量 Python+JS 双侧；删 `manager_agent_config:231` 的 `or "deepseek"` 死掩盖；KI-1 按用户裁决用测试隔离 env，保留 env 合法配置层；+1 回归测试）
 9. **6.2** resolver 默认宽松策略（安全方向错误）✅ 已完成（4 处 `getattr(self, "_active_policy", …)` 读取点默认值不一致——896/1257 fail-closed、965/1071 fail-open；统一改为 `__init__` 建立 fail-closed 实例不变量 `self._active_policy = "report_only"`，4 处读取点直接读 `self._active_policy`；resolve() 仍按请求归一化覆盖；+2 回归测试锁定"未 resolve 即 fail-closed"+"resolve 后反映请求策略"。**范围外观察**：`normalize_fallback_policy("unknown")→allow` 是 fail-open，但被现存测试 line 529 固化为有意行为，不在 §6.2 范围，未改动，留作单独决策项见下方 KI-2）
 10. **3.4 + 3.5** CORS 端口 + key 空串兜底（配置与行为脱钩）✅ 已处置（无需改码）。**§3.4**：bug 属实但被 docs/64 §1.4 显式认领（与 nginx 端口模板化 + 部署脚本端口渲染强耦合），用户裁决延期随 docs/64 一并修。**§3.5**：核查发现审计核心指控「Anthropic/OpenAI 跳过 settings 层」已过期——三个 provider key 现均为 config→settings→env 三层，唯 Tavily 有意 env-only 且可选；`缺失→""` 是可选 key 的合法禁用信号，必需的 DeepSeek 已在用例点强制（在 `_effective_deepseek_api_key` 内改 raise 反会击穿 `get_public_settings` 状态展示）。用户裁决关闭，仅留处置记录
+11. **4.1b** `_ensure_registry`/`_load_registry_items` 损坏输入触发全盘覆盖写（数据丢失，存储层）✅ 已完成（追加 HIGH 收尾，2026-06-22；区分缺失→`[]` vs 损坏→raise/quarantine 备份+重建，写回路径不再用空覆盖，refresh 缓存读容错可从损坏 previous 恢复；+9 测试，569 全绿。详见 §4.1b 实施记录）
 
 > **追加 HIGH（核查中发现，排在主序之后）**：
-> - **§4.1b** `_ensure_registry` 损坏输入触发全盘覆盖写（数据丢失，存储层）。与 #4（§4.1 展示层）根因/修法不同，单独排期、单独评审。
 > - **§2.3b** 重启后不重放 finalization：`report_complete` 孤儿当前诚实标 failed 提示重跑（保真但非恢复），成功恢复（启动重放 finalize 链）高风险，单独立项（#7 拆分）。
 
 ### 排期顺序说明

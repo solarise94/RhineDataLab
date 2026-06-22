@@ -16,7 +16,11 @@ from unittest.mock import MagicMock, patch
 
 from app.core.config import Settings, get_settings
 from app.services.app_config_service import AppConfigService
-from app.services.library_registry_service import LibraryRegistryService, LibrarySummaryPayload
+from app.services.library_registry_service import (
+    LibraryRegistryError,
+    LibraryRegistryService,
+    LibrarySummaryPayload,
+)
 from app.services.project_service import ProjectService
 
 
@@ -306,6 +310,152 @@ class TestLibraryRegistryInstallAndRegister(unittest.TestCase):
 
         entries = {item["id"]: item["summary_short"] for item in service.list_entries("skill")["items"]}
         self.assertEqual(entries["skill-a"], "重建后摘要")
+
+
+class TestLibraryRegistryCorruptionSafety(unittest.TestCase):
+    """docs/67 §4.1b: corrupt/unreadable registry input must never silently
+    collapse into an empty registry that then triggers a destructive overwrite.
+
+    Covers:
+    - file MISSING -> legitimate empty (no error, no quarantine)
+    - file EXISTS but unparseable/schema-mismatch/wrong-kind -> raise (strict load)
+    - corrupt read repairs via quarantine+rebuild, never erasing existing entries
+    - install/register on a corrupt registry does not overwrite it
+    - refresh recovers from a corrupt previous registry (cache miss, not abort)
+    """
+
+    def setUp(self):
+        self._original_data_root = get_settings().data_root
+        self.data_root = Path(tempfile.mkdtemp())
+        self.settings = Settings(data_root=self.data_root)
+        get_settings.cache_clear()
+        self.registry_path = self.data_root / "_system" / "library" / "skills.json"
+
+    def tearDown(self):
+        get_settings.cache_clear()
+        get_settings().data_root = self._original_data_root
+
+    def _service(self):
+        # Empty external roots isolate the registry from any skills present in
+        # the test runner's home dir; only the app-installed capabilities root
+        # (under data_root) is scanned.
+        with patch("app.services.project_service.get_settings", return_value=self.settings):
+            project_service = ProjectService()
+        app_config_service = AppConfigService(settings=self.settings)
+        return LibraryRegistryService(
+            project_service=project_service,
+            app_config_service=app_config_service,
+            settings=self.settings,
+            skill_roots=[],
+            mcp_roots=[],
+        )
+
+    def _install_skill(self, service, skill_id: str) -> None:
+        source = self.data_root / f"src-{skill_id}"
+        source.mkdir(parents=True)
+        (source / "SKILL.md").write_text(
+            f'---\nname: "{skill_id}"\n---\n\n# {skill_id}\n', encoding="utf-8"
+        )
+        service.install_skill_from_directory(source, target_id=skill_id)
+
+    def _corrupt_backups(self):
+        return list(self.registry_path.parent.glob(f"{self.registry_path.name}.corrupt-*.bak"))
+
+    # --- (a) file missing -> legitimate empty -------------------------------
+
+    def test_load_registry_items_returns_empty_when_file_missing(self):
+        service = self._service()
+        self.assertFalse(self.registry_path.exists())
+        self.assertEqual(service._load_registry_items("skill"), [])
+
+    def test_bootstrap_missing_registry_is_legitimate_empty(self):
+        service = self._service()
+        registry = service._ensure_registry("skill")
+        self.assertEqual(registry.items, [])
+        # A missing file is bootstrap, not corruption: nothing is quarantined.
+        self.assertEqual(self._corrupt_backups(), [])
+
+    # --- (b) file exists but unparseable -> raise ---------------------------
+
+    def test_load_registry_items_raises_on_char_corrupt(self):
+        service = self._service()
+        self.registry_path.parent.mkdir(parents=True, exist_ok=True)
+        self.registry_path.write_text("{ this is not valid json", encoding="utf-8")
+        with self.assertRaises(LibraryRegistryError):
+            service._load_registry_items("skill")
+
+    def test_load_registry_items_raises_on_schema_mismatch(self):
+        service = self._service()
+        self.registry_path.parent.mkdir(parents=True, exist_ok=True)
+        # Valid JSON, wrong shape (entry missing required fields). This is the
+        # path the original code silently swallowed into [].
+        self.registry_path.write_text(
+            '{"kind": "skill", "items": [{"unexpected": "shape"}]}', encoding="utf-8"
+        )
+        with self.assertRaises(LibraryRegistryError):
+            service._load_registry_items("skill")
+
+    def test_load_registry_items_raises_on_kind_mismatch(self):
+        service = self._service()
+        self.registry_path.parent.mkdir(parents=True, exist_ok=True)
+        self.registry_path.write_text('{"kind": "mcp", "items": []}', encoding="utf-8")
+        with self.assertRaises(LibraryRegistryError):
+            service._load_registry_items("skill")
+
+    # --- (c) corrupt read repairs; never erases existing entries ------------
+
+    def test_ensure_registry_quarantines_corrupt_and_rebuilds(self):
+        service = self._service()
+        self._install_skill(service, "skill-a")
+        corrupt = '{"kind": "skill", "items": [{"unexpected": "shape"}]}'
+        self.registry_path.write_text(corrupt, encoding="utf-8")
+
+        # A read must not raise and must not erase the on-disk skill.
+        ids = {item["id"] for item in service.list_entries("skill")["items"]}
+        self.assertIn("skill-a", ids)
+
+        backups = self._corrupt_backups()
+        self.assertEqual(len(backups), 1)
+        self.assertEqual(backups[0].read_text(encoding="utf-8"), corrupt)
+        # The live file was rebuilt (no longer the corrupt bytes).
+        self.assertNotEqual(self.registry_path.read_text(encoding="utf-8"), corrupt)
+
+    def test_existing_entries_recovered_after_corruption(self):
+        service = self._service()
+        self._install_skill(service, "skill-a")
+        self._install_skill(service, "skill-b")
+        self.registry_path.write_text("{ broken", encoding="utf-8")
+
+        ids = {item["id"] for item in service.list_entries("skill")["items"]}
+        self.assertIn("skill-a", ids)
+        self.assertIn("skill-b", ids)
+        self.assertEqual(len(self._corrupt_backups()), 1)
+
+    def test_install_does_not_overwrite_corrupt_registry(self):
+        service = self._service()
+        self._install_skill(service, "skill-a")
+        corrupt = '{"kind": "skill", "items": [{"unexpected": "shape"}]}'
+        self.registry_path.write_text(corrupt, encoding="utf-8")
+
+        source_b = self.data_root / "src-skill-b"
+        source_b.mkdir(parents=True)
+        (source_b / "SKILL.md").write_text('---\nname: "skill-b"\n---\n', encoding="utf-8")
+
+        # The write-back must refuse rather than overwrite the table with only B.
+        with self.assertRaises(LibraryRegistryError):
+            service.install_skill_from_directory(source_b, target_id="skill-b")
+        self.assertEqual(self.registry_path.read_text(encoding="utf-8"), corrupt)
+
+    # --- (d) refresh recovers from a corrupt previous (cache miss) ----------
+
+    def test_refresh_entries_recovers_from_corrupt_previous(self):
+        service = self._service()
+        self._install_skill(service, "skill-a")
+        self.registry_path.write_text("{ not json", encoding="utf-8")
+
+        result = service.refresh_entries("skill", force=True)
+        ids = {item["id"] for item in result["items"]}
+        self.assertIn("skill-a", ids)
 
 
 if __name__ == "__main__":
