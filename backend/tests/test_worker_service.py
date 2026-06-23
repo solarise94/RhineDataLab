@@ -121,26 +121,83 @@ class TestCommandWorkerReferencePaths(_Base):
 
 class TestBwrapRuntimeSelection(_Base):
     def tearDown(self):
-        from app.workers import command_worker
+        from app.workers.sandbox import bwrap
 
-        command_worker._BWRAP_SMOKE_CACHE.clear()
+        bwrap._BWRAP_SMOKE_CACHE.clear()
         super().tearDown()
 
     def test_ensure_bwrap_runtime_prefers_configured_env_var(self):
-        from app.workers import command_worker
+        from app.workers.sandbox import bwrap
 
-        command_worker._BWRAP_SMOKE_CACHE.clear()
+        bwrap._BWRAP_SMOKE_CACHE.clear()
         with patch.dict(os.environ, {"BLUEPRINT_BWRAP_BIN": "/usr/bin/bwrap"}, clear=False), patch(
-            "app.workers.command_worker.shutil.which",
+            "app.workers.sandbox.bwrap.shutil.which",
             side_effect=lambda name: "/usr/bin/fallback-bwrap" if name == "bwrap" else None,
         ), patch(
-            "app.workers.command_worker.subprocess.run",
+            "app.workers.sandbox.bwrap.subprocess.run",
             return_value=subprocess.CompletedProcess(args=[], returncode=0),
         ) as run_mock:
-            resolved = command_worker._ensure_bwrap_runtime()
+            resolved = bwrap.ensure_bwrap_runtime()
 
         self.assertEqual(resolved, "/usr/bin/bwrap")
         self.assertEqual(run_mock.call_args.args[0][0], "/usr/bin/bwrap")
+
+
+class TestSandboxModeValidation(_Base):
+    def test_settings_sandbox_mode_rejects_unknown_mode(self):
+        from app.workers.sandbox import settings_sandbox_mode
+
+        settings = Settings(data_root=self.data_root, executor_sandbox_mode="unknown_mode")
+        with self.assertRaises(RuntimeError) as ctx:
+            settings_sandbox_mode(settings)
+        self.assertIn("unknown_mode", str(ctx.exception))
+        self.assertIn("bwrap, container, seatbelt, none", str(ctx.exception))
+
+    def test_resolve_renderer_rejects_unknown_mode(self):
+        from app.workers.sandbox import resolve_renderer
+
+        with self.assertRaises(RuntimeError) as ctx:
+            resolve_renderer("unknown_mode")
+        self.assertIn("unknown_mode", str(ctx.exception))
+
+    def test_adapter_uses_sandbox_rejects_unknown_mode(self):
+        adapter = ShellWorkerAdapter()
+        settings = Settings(data_root=self.data_root, executor_sandbox_mode="unknown_mode")
+        with self.assertRaises(RuntimeError) as ctx:
+            adapter.uses_sandbox(settings)
+        self.assertIn("unknown_mode", str(ctx.exception))
+
+
+class TestNoneRenderer(_Base):
+    def test_resolve_renderer_none_returns_no_op_renderer(self):
+        from app.workers.sandbox import NoneRenderer, resolve_renderer
+
+        renderer = resolve_renderer("none")
+        self.assertIsInstance(renderer, NoneRenderer)
+        self.assertEqual(renderer.mode, "none")
+        self.assertFalse(renderer.should_sandbox())
+
+    def test_none_renderer_leaves_command_unchanged(self):
+        from app.workers.sandbox import resolve_renderer
+
+        renderer = resolve_renderer("none")
+        command = ["python", "script.py"]
+        result, plan = renderer.render(
+            command=command,
+            packet=None,
+            project_root=self.data_root,
+            run_dir=self.data_root / "runs" / "run-1",
+            environment={},
+            adapter_extra_env_keys=set(),
+            settings=self.settings,
+        )
+        self.assertEqual(result, command)
+        self.assertEqual(plan, {"mode": "none"})
+
+    def test_adapter_uses_sandbox_false_for_none_mode(self):
+        adapter = ShellWorkerAdapter()
+        settings = Settings(data_root=self.data_root, executor_sandbox_mode="none")
+        self.assertFalse(adapter.uses_sandbox(settings))
 
 
 if __name__ == "__main__":

@@ -338,7 +338,7 @@ class DiagnosticBundleService:
         return {"version": sys.version, "executable": sys.executable}
 
     def _bwrap_info(self) -> dict[str, Any]:
-        from app.workers.command_worker import _BWRAP_SMOKE_CACHE, _ensure_bwrap_runtime
+        from app.workers.sandbox.bwrap import _BWRAP_SMOKE_CACHE, ensure_bwrap_runtime
 
         configured_mode = str(getattr(self.settings, "executor_sandbox_mode", "none"))
         bwrap_path = shutil.which("bwrap")
@@ -346,7 +346,7 @@ class DiagnosticBundleService:
         smoke_ok = False
         smoke_error = None
         try:
-            resolved = _ensure_bwrap_runtime()
+            resolved = ensure_bwrap_runtime()
             smoke_ok = True
             bwrap_path = bwrap_path or resolved
         except Exception as exc:
