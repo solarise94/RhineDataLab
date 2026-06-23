@@ -371,6 +371,55 @@ docker run -v $PWD/.env:/app/.env:ro ...
 - [ ] 停容器 → 重启容器，四个进程都被 supervisord 拉起（等价现 systemd `Restart=always`）
 - [ ] 现有 Linux systemd 部署路径回归通过（bwrap 模式未受影响）
 
+### 1.9 实施记录（docs/70 轮次）
+
+本轮完成 §1.1、§1.2、§1.4 的共享重构，为 §1.5 Dockerfile 铺平道路；
+§1.3 进程编排、§1.5-1.8 Docker 专属工作留待下一轮。
+
+#### §1.1 沙箱 renderer 抽象（已落地）
+
+- 新增 `backend/app/workers/sandbox/` 包：
+  - `base.py`：抽象基类 `SandboxRenderer`，统一 `mode` / `should_sandbox` / `render` 接口。
+  - `bwrap.py`：原 `command_worker._ensure_bwrap_runtime` 及 bwrap plan 生成逻辑整体迁入
+    `BwrapRenderer`，行为与重构前完全一致；`ensure_bwrap_runtime()` 仍做 bwrap smoke test。
+  - `container.py`：`ContainerRenderer`，容器即隔离，直接返回原命令，但仍生成
+    `sandbox_plan.json` 供审计/诊断使用；`data_mount` 门控随 `mode in ("bwrap", "container", "seatbelt")` 放行。
+  - `seatbelt.py`：macOS seatbelt 占位，实现 `NotImplementedError`。
+  - `__init__.py`：`resolve_renderer()`、`settings_sandbox_mode()`；`settings_sandbox_mode()`
+    对未知 mode 显式 `RuntimeError`，避免静默 fallback 到 unsandboxed。
+- `backend/app/workers/command_worker.py`：移除 bwrap 专属逻辑，改为通过
+  `resolve_renderer(settings_sandbox_mode(settings)).render(...)` 调用；修复重构时遗漏的
+  `resolve_rscript_runtime` / `r_user_library_paths` import。
+- `backend/app/services/diagnostic_bundle_service.py`：更新 bwrap 相关 import，指向新模块。
+- `backend/tests/test_worker_service.py`：新增 bwrap runtime 选择测试与未知 mode 报错测试。
+- 回归：`executor_sandbox_mode=bwrap` 的 Linux 行为零变化；全量 590 例 backend 测试通过。
+
+#### §1.2 `data_root` env 化（已核查）
+
+- `config.py:84` 的 `data_root` 已经通过 `env_prefix="BLUEPRINT_"` 支持 `BLUEPRINT_DATA_ROOT`
+  覆盖，默认值仅作为 source-of-truth 的 fallback，不再额外写死 os.environ 读取。
+- grep 全仓库（backend/app、frontend、manager-agent、scripts）确认：所有运行时 data 读写
+  均通过 `settings.data_root` / `get_settings().data_root` 访问；未发现绕过 settings 直接写死
+  `Path(...) / "workspace"` 的应用路径。
+- 独立迁移脚本 `scripts/migrate_output_contracts.py` 仍默认操作仓库根 `workspace/`，但它不是
+  应用运行时路径，不影响 Docker `BLUEPRINT_DATA_ROOT=/data` 挂载。
+- 结论：§1.2 本轮零代码改动，核查记录归档。
+
+#### §1.4 nginx 端口模板化 + CORS 收尾（已落地）
+
+- `deploy/nginx/blueprint-re.conf.template`：
+  - `listen 127.0.0.1:13001` → `listen __NGINX_LISTEN__`
+  - `proxy_pass http://127.0.0.1:13002` → `proxy_pass http://127.0.0.1:__FRONTEND_PORT__`
+  - `proxy_pass http://127.0.0.1:18001` → `proxy_pass http://127.0.0.1:__BACKEND_PORT__`
+- `scripts/deploy_user_systemd.sh`：渲染 nginx.conf 时填默认值
+  `__NGINX_LISTEN__=127.0.0.1:13001`、`__FRONTEND_PORT__=13002`、`__BACKEND_PORT__=18001`，
+  Linux 现状完全不变。
+- `scripts/deploy_release.sh`：`render_template` 调用同步替换上述三个占位符，保持默认端口。
+- `backend/app/main.py`：移除 CORS 中硬编码的 `http://127.0.0.1:13001` /
+  `http://localhost:13001`，改为基于 `settings.frontend_origin` 派生（保留 127.0.0.1 与
+  localhost 互替）。现有 deploy 脚本已写 `BLUEPRINT_FRONTEND_ORIGIN=http://127.0.0.1:13001`，
+  Linux 现状行为不变；改端口后 CORS 自动跟随。
+
 ---
 
 ## 产物二：macOS 原生应用

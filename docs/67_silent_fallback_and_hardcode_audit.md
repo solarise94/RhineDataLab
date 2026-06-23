@@ -402,6 +402,19 @@ run 在 API 层 401，用户看到的是"执行失败"而非"profile 配置不�
 （a）与 docs/64 计划冲突，（b）若部署脚本未同步设 `BLUEPRINT_FRONTEND_ORIGIN=<网关端口>`，
 生产 CORS 会立即失效。**用户裁决：延期，随 docs/64 §1.4 一并修，不在本审计 #10 内单独改。**
 
+**处置更新（2026-06-22，docs/70 轮次）——已关闭（CLOSED），由 docs/64 §1.4 落地**：
+
+CORS 硬编码已随 docs/64 §1.4 共享重构一并修复：
+- `backend/app/main.py` 移除 `http://127.0.0.1:13001` / `http://localhost:13001` 字面量，
+  改为基于 `settings.frontend_origin` 派生（保留 127.0.0.1 与 localhost 互替形式）。
+- `deploy/nginx/blueprint-re.conf.template` 端口占位符化
+  （`__NGINX_LISTEN__` / `__FRONTEND_PORT__` / `__BACKEND_PORT__`）。
+- `deploy_user_systemd.sh` / `deploy_release.sh` 渲染时填默认端口，且二者已写
+  `BLUEPRINT_FRONTEND_ORIGIN=http://127.0.0.1:13001`，与 CORS 派生值一致——Linux 现状
+  行为不变，改端口后 CORS 自动跟随，配置与行为重新对齐。
+
+§3.4 自此从 deferred 转为 **closed**。详见 docs/64 §1.9 实施记录。
+
 ### 3.5 [HIGH] Tavily / Anthropic / OpenAI key 缺失静默成空串
 
 `backend/app/services/app_config_service.py:74,242,268,446,454`
