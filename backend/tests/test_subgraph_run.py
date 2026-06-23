@@ -136,8 +136,12 @@ class TestSubgraphRunService(unittest.TestCase):
 
         self.assertEqual(result["planned_cards"], ["A", "B", "C"])
         self.assertTrue(result["batch_run_id"].startswith("batch_"))
-        # Give scheduler a moment to start A.
-        time.sleep(0.2)
+        # The scheduler runs A on a background thread; poll for the recorded
+        # call instead of a fixed sleep so we return as soon as it lands (and
+        # still fail fast with a clear assertion if it never does).
+        deadline = time.time() + 1.0
+        while not fake_worker.rerun_calls and time.time() < deadline:
+            time.sleep(0.01)
         self.assertEqual(fake_worker.rerun_calls, [("test-project", "A")])
 
     def test_compute_subgraph_excludes_unrelated_branches(self):

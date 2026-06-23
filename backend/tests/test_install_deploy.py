@@ -158,20 +158,28 @@ class TestInstallDeployBehavior(unittest.TestCase):
             (temp_bin / "npm").write_text(npm_stub, encoding="utf-8")
             (temp_bin / "npm").chmod(0o755)
 
-            # Python wrapper: intercept "python -m venv" so we can inject a stub pip
-            # into the created venv. This avoids flaky network calls during tests.
+            # Python wrapper: intercept "python -m venv" and synthesize a fake
+            # venv layout (bin/python + bin/pip) instead of actually creating
+            # one. A real venv is the single most expensive step per test
+            # (~5s each); the deploy script only needs bin/pip to exit 0 and
+            # bin/python to exist for the -x check, so a stub layout suffices
+            # and keeps tests fully offline.
             real_python = sys.executable
             python_wrapper = (
                 '#!/bin/bash\n'
                 f'REAL_PYTHON="{real_python}"\n'
                 'if [[ "$1" == "-m" && "$2" == "venv" ]]; then\n'
-                '  "$REAL_PYTHON" "$@"\n'
                 '  VENV_DIR="${!#}"\n'
+                '  mkdir -p "${VENV_DIR}/bin"\n'
+                '  cat > "${VENV_DIR}/bin/python" <<\'PYEOF\'\n'
+                f'#!/bin/bash\n'
+                f'exec "{real_python}" "$@"\n'
+                'PYEOF\n'
                 '  cat > "${VENV_DIR}/bin/pip" <<\'PIPEEOF\'\n'
                 '#!/bin/bash\n'
                 'exit 0\n'
                 'PIPEEOF\n'
-                '  chmod +x "${VENV_DIR}/bin/pip"\n'
+                '  chmod +x "${VENV_DIR}/bin/python" "${VENV_DIR}/bin/pip"\n'
                 '  exit 0\n'
                 'fi\n'
                 'exec "$REAL_PYTHON" "$@"\n'
@@ -185,6 +193,10 @@ class TestInstallDeployBehavior(unittest.TestCase):
             env["PATH"] = f"{temp_bin}:{env.get('PATH', '')}"
             # Skip HTTP health probes in stub env (see docstring); extra_env can override.
             env["BLUEPRINT_DEPLOY_SKIP_HEALTH_CHECK"] = "1"
+            # All systemctl calls are stubbed (exit 0), so the stop/start settle
+            # delays add nothing here. Zero them out to skip ~5s of dead waiting.
+            env["BLUEPRINT_DEPLOY_STOP_SETTLE_SECONDS"] = "0"
+            env["BLUEPRINT_DEPLOY_HEALTH_SETTLE_SECONDS"] = "0"
             if extra_env:
                 env.update(extra_env)
 
