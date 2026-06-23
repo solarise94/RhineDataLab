@@ -728,7 +728,10 @@ mkdir -p "${APP_ENV_DIR}/nginx-tmp/body" "${APP_ENV_DIR}/nginx-tmp/proxy" \
 
 render_template "${RELEASE_ROOT}/deploy/blueprint-re.conf.template" \
   "${APP_ENV_DIR}/nginx.conf" \
-  "__APP_ENV_DIR__=${APP_ENV_DIR}"
+  "__APP_ENV_DIR__=${APP_ENV_DIR}" \
+  "__NGINX_LISTEN__=127.0.0.1:13001" \
+  "__FRONTEND_PORT__=13002" \
+  "__BACKEND_PORT__=18001"
 
 render_template "${SYSTEMD_TEMPLATE_DIR}/blueprint-re-nginx.service" \
   "${SYSTEMD_USER_DIR}/blueprint-re-nginx.service" \

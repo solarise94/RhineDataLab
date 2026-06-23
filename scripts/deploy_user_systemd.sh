@@ -790,7 +790,11 @@ EOF
   sed -e "s|__ROOT__|${ROOT_DIR}|g" -e "s|__FRONTEND_RELEASE_DIR__|${FRONTEND_RELEASE_DIR}|g" -e "s|__NODE_BIN__|${NODE_BIN}|g" "${ROOT_DIR}/deploy/systemd/blueprint-re-frontend.service" > "${SYSTEMD_USER_DIR}/blueprint-re-frontend.service"
 
   mkdir -p "${APP_ENV_DIR}/nginx-tmp/body" "${APP_ENV_DIR}/nginx-tmp/proxy" "${APP_ENV_DIR}/nginx-tmp/fastcgi" "${APP_ENV_DIR}/nginx-tmp/uwsgi" "${APP_ENV_DIR}/nginx-tmp/scgi"
-  sed -e "s|__APP_ENV_DIR__|${APP_ENV_DIR}|g" "${ROOT_DIR}/deploy/nginx/blueprint-re.conf.template" > "${APP_ENV_DIR}/nginx.conf"
+  sed -e "s|__APP_ENV_DIR__|${APP_ENV_DIR}|g" \
+      -e "s|__NGINX_LISTEN__|127.0.0.1:13001|g" \
+      -e "s|__FRONTEND_PORT__|13002|g" \
+      -e "s|__BACKEND_PORT__|18001|g" \
+      "${ROOT_DIR}/deploy/nginx/blueprint-re.conf.template" > "${APP_ENV_DIR}/nginx.conf"
   sed -e "s|__NGINX_BIN__|${NGINX_BIN}|g" -e "s|__APP_ENV_DIR__|${APP_ENV_DIR}|g" "${ROOT_DIR}/deploy/systemd/blueprint-re-nginx.service" > "${SYSTEMD_USER_DIR}/blueprint-re-nginx.service"
 
   systemctl --user daemon-reload
@@ -811,7 +815,9 @@ systemctl --user stop blueprint-re-nginx.service || true
 systemctl --user stop blueprint-re-frontend.service || true
 systemctl --user stop blueprint-re-backend.service || true
 systemctl --user stop blueprint-re-manager-agent.service || true
-sleep 2
+# Allow tests / fast restarts to shorten this settle delay. Default keeps
+# production behavior unchanged.
+sleep "${BLUEPRINT_DEPLOY_STOP_SETTLE_SECONDS:-2}"
 
 # Confirm ports were released. If something outside this systemd set is still
 # listening, warn but continue; the user can then decide whether to kill it.
@@ -827,7 +833,9 @@ systemctl --user start blueprint-re-nginx.service
 
 # Wait for services to settle, then run health checks.
 echo "Running health checks..."
-sleep 3
+# Allow tests / fast restarts to shorten this settle delay. Default keeps
+# production behavior unchanged.
+sleep "${BLUEPRINT_DEPLOY_HEALTH_SETTLE_SECONDS:-3}"
   HEALTH_OK=1
 
   # Verify each user-level service is active before trusting the HTTP probes.
