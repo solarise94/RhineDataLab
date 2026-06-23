@@ -56,12 +56,15 @@ async def lifespan(_app: FastAPI):
 
 
 app = FastAPI(title=settings.app_name, lifespan=lifespan)
+# CORS origins are derived from settings.frontend_origin so that changing the
+# gateway/UI port via BLUEPRINT_FRONTEND_ORIGIN keeps cross-origin access working
+# without editing code.
+_frontend_origin = settings.frontend_origin
 allowed_frontend_origins = list(
     dict.fromkeys(
         [
-            settings.frontend_origin,
-            "http://127.0.0.1:13001",
-            "http://localhost:13001",
+            _frontend_origin,
+            _frontend_origin.replace("127.0.0.1", "localhost"),
         ]
     )
 )
