@@ -176,6 +176,12 @@ def get_manager_auto_service() -> ManagerAutoService:
     )
 
 
+@lru_cache
+def get_chat_stream_relay() -> "ChatStreamRelay":
+    from app.services.chat_stream_relay import ChatStreamRelay
+    return ChatStreamRelay(get_chat_session_service(), get_manager_service())
+
+
 def inject_wake_dispatch() -> None:
     """Doc 42: Inject chat_stream_relay into ManagerAutoService for transient wake dispatch
     and wire fuel_change_callback so fuel_revision stays in sync with actual mutations.
@@ -184,10 +190,9 @@ def inject_wake_dispatch() -> None:
     to avoid circular dependency: ManagerAutoService -> ChatStreamRelay ->
     ChatSessionService -> ManagerAutoService.
     """
-    from app.services.chat_stream_relay import ChatStreamRelay
     auto_svc = get_manager_auto_service()
     if auto_svc._chat_stream_relay is None:
-        auto_svc.set_chat_stream_relay(ChatStreamRelay(get_chat_session_service(), get_manager_service()))
+        auto_svc.set_chat_stream_relay(get_chat_stream_relay())
     # Wire fuel_revision bump to all fuel mutation paths (Fix 1)
     wb = get_background_workboard_service()
     wb.set_fuel_change_callback(lambda pid: auto_svc.increment_fuel_revision(pid))

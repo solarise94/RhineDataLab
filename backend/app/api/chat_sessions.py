@@ -84,6 +84,8 @@ def save_chat_session(
     request: SaveChatSessionRequest,
     chat_session_service: ChatSessionService = Depends(get_chat_session_service),
 ) -> dict:
+    """Legacy full-session save. Deprecated: /chat-stream now persists messages
+    server-side when BLUEPRINT_CHAT_SINGLE_SOURCE is enabled."""
     try:
         return {
             "session": chat_session_service.save_session(

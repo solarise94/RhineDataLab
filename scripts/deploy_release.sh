@@ -368,6 +368,7 @@ check_unknown_blueprint_env_keys() {
     BLUEPRINT_ANTHROPIC_API_KEY
     BLUEPRINT_BACKEND_API_BASE_URL
     BLUEPRINT_BIOCONDUCTOR_MIRROR
+    BLUEPRINT_CHAT_SINGLE_SOURCE
     BLUEPRINT_CLAUDE_CODE_COMMAND_JSON
     BLUEPRINT_CODEX_COMMAND_JSON
     BLUEPRINT_CRAN_MIRROR
@@ -546,6 +547,9 @@ write_env_line "${APP_ENV_DIR}/backend.env" BLUEPRINT_EXECUTOR_MAMBA_ROOT_PREFIX
 write_env_line "${APP_ENV_DIR}/backend.env" BLUEPRINT_EXECUTOR_MAMBARC "${BLUEPRINT_EXECUTOR_MAMBARC:-${MAMBARC:-}}"
 write_env_line "${APP_ENV_DIR}/backend.env" BLUEPRINT_CRAN_MIRROR "${BLUEPRINT_CRAN_MIRROR:-}"
 write_env_line "${APP_ENV_DIR}/backend.env" BLUEPRINT_BIOCONDUCTOR_MIRROR "${BLUEPRINT_BIOCONDUCTOR_MIRROR:-}"
+# Feature flag: when true, manual chat routes through ChatStreamRelay so the
+# backend becomes the single source of truth for chat sessions. Default false.
+write_env_line "${APP_ENV_DIR}/backend.env" BLUEPRINT_CHAT_SINGLE_SOURCE "${BLUEPRINT_CHAT_SINGLE_SOURCE:-}"
 write_env_line "${APP_ENV_DIR}/backend.env" BLUEPRINT_PYPI_MIRROR "${BLUEPRINT_PYPI_MIRROR:-}"
 write_env_line "${APP_ENV_DIR}/backend.env" BLUEPRINT_HTTP_PROXY "${BLUEPRINT_HTTP_PROXY:-}"
 write_env_line "${APP_ENV_DIR}/backend.env" BLUEPRINT_HTTPS_PROXY "${BLUEPRINT_HTTPS_PROXY:-}"

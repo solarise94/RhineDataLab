@@ -341,17 +341,6 @@ export const api = {
       body: JSON.stringify({ messages, summary: summary ?? null, base_revision: baseRevision ?? null }),
     });
   },
-  appendChatSessionMessages(
-    projectId: string,
-    sessionId: string,
-    messages: ChatSessionMessageRecord[],
-    dedupeIds: string[] = [],
-  ) {
-    return request<{ session: ChatSessionDetail }>(`/projects/${projectId}/chat-sessions/${sessionId}/messages`, {
-      method: "POST",
-      body: JSON.stringify({ messages, dedupe_ids: dedupeIds }),
-    });
-  },
   deleteChatSession(projectId: string, sessionId: string) {
     return request<{ ok: boolean }>(`/projects/${projectId}/chat-sessions/${sessionId}`, {
       method: "DELETE",
@@ -552,6 +541,61 @@ export const api = {
     }
     buffer += decoder.decode();
     flushBuffer();
+  },
+  async sendChat(
+    projectId: string,
+    message: string,
+    thinkingEffort: "low" | "medium" | "high" = "medium",
+    messages: ChatHistoryMessage[] = [],
+    sessionMessages: ChatSessionMessageRecord[] = [],
+    context: ChatRequestContext = {},
+    sessionId?: string | null,
+    messageId?: string | null,
+    signal?: AbortSignal,
+  ): Promise<{ sessionId: string | null; done: Promise<void> }> {
+    const response = await fetch(`${API_BASE}/projects/${projectId}/chat-stream`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        message,
+        session_id: sessionId ?? null,
+        context,
+        thinking_effort: thinkingEffort,
+        messages,
+        session_messages: sessionMessages,
+        message_id: messageId ?? null,
+      }),
+      cache: "no-store",
+      signal,
+    });
+    if (!response.ok) {
+      const text = await response.text();
+      throw new Error(text || `Chat stream failed: ${response.status}`);
+    }
+
+    const returnedSessionId = response.headers.get("X-Blueprint-Session-Id") || sessionId || null;
+
+    // Keep the HTTP generator alive so the backend can finish streaming. The
+    // actual rendering is driven by the events SSE subscription, not this body.
+    let done: Promise<void>;
+    if (response.body) {
+      const reader = response.body.getReader();
+      done = (async () => {
+        try {
+          while (true) {
+            const { done: readerDone } = await reader.read();
+            if (readerDone) break;
+          }
+        } catch {
+          // Body consumption errors are expected when the user aborts the
+          // request via the shared AbortSignal.
+        }
+      })();
+    } else {
+      done = Promise.resolve();
+    }
+
+    return { sessionId: returnedSessionId, done };
   },
   getManagerAuto(projectId: string, sessionId?: string | null) {
     const query = sessionId ? `?session_id=${encodeURIComponent(sessionId)}` : "";

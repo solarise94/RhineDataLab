@@ -154,6 +154,9 @@ class Settings(BaseSettings):
     claude_code_command_json: list[str] | None = None
     codex_command_json: list[str] | None = None
 
+    # Chat single-source-of-truth feature flag (Doc 71 Phase 0)
+    chat_single_source: bool = False
+
     # Runtime dependency resolver controls (P1).
     # Default policy is "allow_safe_registry_install" so resolver-approved
     # single-family fallback installs (pip / cran / bioconductor) may execute

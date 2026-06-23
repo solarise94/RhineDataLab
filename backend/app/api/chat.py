@@ -1,9 +1,11 @@
+import asyncio
 import logging
+import threading
 from pathlib import Path
 import re
 from uuid import uuid4
 
-from fastapi import APIRouter, Body, Depends, File, HTTPException, UploadFile
+from fastapi import APIRouter, Body, Depends, File, HTTPException, Request, UploadFile
 from starlette.requests import ClientDisconnect
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
@@ -11,6 +13,7 @@ from pydantic import BaseModel
 from app.api.deps import (
     get_chat_job_service,
     get_chat_session_service,
+    get_chat_stream_relay,
     get_manager_auto_service,
     get_manager_service,
     get_patch_apply_service,
@@ -18,9 +21,11 @@ from app.api.deps import (
     get_runtime_dependency_job_service,
     get_manager_command_service,
 )
+from app.core.config import get_settings
 from app.models.chat import ChatRequest, ChatSessionMessage, ChatSessionMessageTimelineItem
 from app.models.graph import Asset
 from app.models.patches import GraphPatch
+from app.services.chat_stream_relay import ChatStreamRelay
 from app.services.chat_job_service import ChatJobService
 from app.services.chat_session_service import ChatSessionService
 from app.services.manager_auto_service import ManagerAutoService
@@ -41,6 +46,16 @@ class AcceptProposalRequest(BaseModel):
     session_id: str | None = None
 
 
+async def _watch_disconnect(http_request: Request, event: threading.Event) -> None:
+    """Set ``event`` once the HTTP client disconnects."""
+    try:
+        while not await http_request.is_disconnected():
+            await asyncio.sleep(0.05)
+    except Exception:
+        pass
+    event.set()
+
+
 @router.post("/chat", deprecated=True)
 def chat(project_id: str, request: ChatRequest, manager_service: ManagerService = Depends(get_manager_service)) -> dict:
     """Legacy synchronous compatibility endpoint. New callers must use /chat-stream."""
@@ -53,11 +68,14 @@ def chat(project_id: str, request: ChatRequest, manager_service: ManagerService 
 
 
 @router.post("/chat-stream")
-def chat_stream(
+async def chat_stream(
     project_id: str,
     request: ChatRequest,
+    http_request: Request,
     manager_service: ManagerService = Depends(get_manager_service),
     manager_command_service = Depends(get_manager_command_service),
+    chat_session_service: ChatSessionService = Depends(get_chat_session_service),
+    chat_stream_relay: ChatStreamRelay = Depends(get_chat_stream_relay),
 ) -> StreamingResponse:
     is_cmd, cmd_type, obj = parse_slash_command(request.message)
     if is_cmd:
@@ -72,30 +90,166 @@ def chat_stream(
             },
         )
 
-    try:
-        stream = manager_service.stream_chat(project_id, request)
-    except ProviderAPIError as exc:
-        raise HTTPException(status_code=502, detail=exc.to_dict()) from exc
-    except ManagerPlanningError as exc:
-        raise HTTPException(status_code=502, detail=str(exc)) from exc
+    settings = get_settings()
+    if not settings.chat_single_source:
+        try:
+            stream = manager_service.stream_chat(project_id, request)
+        except ProviderAPIError as exc:
+            raise HTTPException(status_code=502, detail=exc.to_dict()) from exc
+        except ManagerPlanningError as exc:
+            raise HTTPException(status_code=502, detail=str(exc)) from exc
+        return StreamingResponse(
+            stream,
+            media_type="text/event-stream",
+            headers={
+                "Cache-Control": "no-cache, no-transform",
+                "X-Accel-Buffering": "no",
+            },
+        )
+
+    session_id = _ensure_session(project_id, request, chat_session_service)
+    user_message = _build_user_message(request)
+    chat_session_service.append_messages(project_id, session_id, [user_message])
+
+    manager_message_id = f"mgr_{uuid4().hex[:12]}"
+    disconnect_event = threading.Event()
+    asyncio.create_task(_watch_disconnect(http_request, disconnect_event))
     return StreamingResponse(
-        stream,
+        chat_stream_relay.stream_to_http(
+            project_id,
+            session_id,
+            request,
+            message_id=manager_message_id,
+            disconnect_event=disconnect_event,
+        ),
         media_type="text/event-stream",
         headers={
             "Cache-Control": "no-cache, no-transform",
             "X-Accel-Buffering": "no",
+            "X-Blueprint-Session-Id": session_id,
         },
     )
 
 
+def _ensure_session(project_id: str, request: ChatRequest, chat_session_service: ChatSessionService) -> str:
+    if request.session_id:
+        return request.session_id
+    session = chat_session_service.create_session(project_id)
+    request.session_id = session.session_id
+    return session.session_id
+
+
+def _build_user_message(request: ChatRequest) -> ChatSessionMessage:
+    message_id = request.message_id or f"usr_{uuid4().hex[:12]}"
+    attachments = getattr(request, "attachments", None) or []
+    return ChatSessionMessage(
+        id=message_id,
+        role="user",
+        content=request.message,
+        state="done",
+        timeline=[
+            ChatSessionMessageTimelineItem(
+                id=f"{message_id}_text",
+                kind="text",
+                content=request.message,
+                status="done",
+            ),
+        ],
+        attachments=list(attachments) if attachments else [],
+    )
+
+
+def _persist_compact_result(
+    chat_session_service: ChatSessionService,
+    project_id: str,
+    session_id: str,
+    result: dict,
+) -> None:
+    """Persist the compact summary into the session as the canonical record."""
+    compact_id = str(result.get("compact_id") or f"compact_{uuid4().hex[:12]}")
+    summary = str(result.get("summary") or "上下文已压缩。")
+    first_kept_message_id = result.get("first_kept_message_id")
+    tokens_before = result.get("tokens_before")
+    tokens_after = result.get("tokens_after")
+    duration_ms = result.get("duration_ms")
+    provider = result.get("provider")
+    model = result.get("model")
+
+    session = chat_session_service.get_session(project_id, session_id)
+    retained_messages = list(session.messages)
+    if first_kept_message_id and first_kept_message_id != "root":
+        found_index = -1
+        for index, message in enumerate(session.messages):
+            if message.id == first_kept_message_id:
+                found_index = index
+                break
+            if message.timeline:
+                for item in message.timeline:
+                    if item.id == first_kept_message_id:
+                        found_index = index
+                        break
+                if found_index >= 0:
+                    break
+        if found_index >= 0:
+            retained_messages = session.messages[found_index:]
+
+    compact_message = ChatSessionMessage(
+        id=f"compact_msg_{compact_id}",
+        role="manager",
+        content=summary,
+        state="done",
+        timeline=[
+            ChatSessionMessageTimelineItem(
+                id=compact_id,
+                kind="compact",
+                content=summary,
+                status="done",
+                first_kept_message_id=first_kept_message_id,
+                tokens_before=tokens_before,
+                tokens_after=tokens_after,
+                duration_ms=duration_ms,
+                provider=provider,
+                model=model,
+            ),
+        ],
+    )
+    chat_session_service.save_session(
+        project_id,
+        session_id,
+        [compact_message, *retained_messages],
+        summary=None,
+        base_revision=session.revision,
+    )
+
+
 @router.post("/chat-compact")
-def chat_compact(project_id: str, request: ChatRequest, manager_service: ManagerService = Depends(get_manager_service)) -> dict:
+def chat_compact(
+    project_id: str,
+    request: ChatRequest,
+    manager_service: ManagerService = Depends(get_manager_service),
+    chat_session_service: ChatSessionService = Depends(get_chat_session_service),
+) -> dict:
     try:
-        return manager_service.compact_chat_session(project_id, request)
+        result = manager_service.compact_chat_session(project_id, request)
     except ProviderAPIError as exc:
         raise HTTPException(status_code=502, detail=exc.to_dict()) from exc
     except ManagerPlanningError as exc:
         raise HTTPException(status_code=502, detail=str(exc)) from exc
+
+    # In single-source mode the backend persists the compact summary so the
+    # session remains authoritative. Legacy mode continues to rely on the
+    # frontend PUT path and local compaction.
+    settings = get_settings()
+    if settings.chat_single_source and request.session_id:
+        try:
+            _persist_compact_result(chat_session_service, project_id, request.session_id, result)
+        except ValueError:
+            # Session missing is not fatal; still return the compact result.
+            pass
+        except Exception:
+            logger.exception("Failed to persist compact result: project=%s session=%s", project_id, request.session_id)
+
+    return result
 
 
 @router.post("/chat-jobs", deprecated=True)

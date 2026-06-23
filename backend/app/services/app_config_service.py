@@ -93,6 +93,7 @@ class AppConfigService:
             "worker_timeout_seconds": self._effective_worker_timeout_seconds(config),
             "manifest_repair_timeout_seconds": self._effective_manifest_repair_timeout_seconds(config),
             "available_executors": self._available_executors(),
+            "chat_single_source": bool(getattr(self.settings, "chat_single_source", False)),
         }
 
     def update_settings(self, payload: dict[str, Any]) -> dict[str, Any]:

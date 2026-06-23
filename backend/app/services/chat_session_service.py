@@ -158,24 +158,36 @@ class ChatSessionService:
             )
             return self._decorate_session(project_id, session)
 
-    def subscribe_events(self, project_id: str, session_id: str) -> Iterator[dict]:
+    def subscribe_events(
+        self,
+        project_id: str,
+        session_id: str,
+        *,
+        timeout_seconds: float = 15.0,
+    ) -> Iterator[dict]:
         queue: Queue[dict] = Queue(maxsize=256)
         key = (project_id, session_id)
+        # Register the queue eagerly so that callers can subscribe before triggering
+        # the publisher and still receive all events.
         with self._subscriber_lock:
             self._subscribers.setdefault(key, []).append(queue)
-        try:
-            while True:
-                try:
-                    yield queue.get(timeout=15)
-                except Empty:
-                    yield {"type": "heartbeat"}
-        finally:
-            with self._subscriber_lock:
-                subscribers = self._subscribers.get(key, [])
-                if queue in subscribers:
-                    subscribers.remove(queue)
-                if not subscribers:
-                    self._subscribers.pop(key, None)
+
+        def _iter() -> Iterator[dict]:
+            try:
+                while True:
+                    try:
+                        yield queue.get(timeout=timeout_seconds)
+                    except Empty:
+                        yield {"type": "heartbeat"}
+            finally:
+                with self._subscriber_lock:
+                    subscribers = self._subscribers.get(key, [])
+                    if queue in subscribers:
+                        subscribers.remove(queue)
+                    if not subscribers:
+                        self._subscribers.pop(key, None)
+
+        return _iter()
 
     def publish_stream_event(
         self,

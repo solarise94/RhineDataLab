@@ -597,6 +597,7 @@ export interface AppSettings {
   worker_timeout_seconds: number;
   manifest_repair_timeout_seconds: number;
   available_executors: string[];
+  chat_single_source?: boolean;
 }
 
 export type ApiProviderProtocol = "anthropic_compatible" | "openai_compatible";

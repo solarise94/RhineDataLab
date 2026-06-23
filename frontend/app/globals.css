@@ -2330,6 +2330,10 @@ button {
   color: var(--red-dark);
 }
 
+.manager-tool-divider.interrupted .manager-tool-divider-label {
+  color: var(--gray-dark);
+}
+
 .manager-tool-report {
   font-size: 12px;
   color: var(--muted);

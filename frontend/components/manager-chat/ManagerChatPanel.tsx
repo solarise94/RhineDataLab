@@ -19,13 +19,13 @@ import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 
 import { api, apiUrl, ChatHistoryMessage, ChatRequestContext, ChatStreamEvent, ChatTokenUsage } from "@/lib/api";
-import { useChatSession, useModifyProposalMutation } from "@/lib/hooks";
+import { useChatSession, useModifyProposalMutation, useAppSettings } from "@/lib/hooks";
 import { queryKeys } from "@/lib/query-keys";
 import { Asset, ChatSessionDetail, ChatSessionMessageRecord, ManagerAutoState, ProjectSnapshot, Proposal } from "@/lib/types";
 import { Attachment, EMPTY_ATTACHMENTS, useWorkspaceUiStore } from "@/lib/stores/workspace-ui-store";
 
 type ThinkingEffort = "low" | "medium" | "high";
-type ToolState = "running" | "done" | "error";
+type ToolState = "running" | "done" | "error" | "interrupted";
 type TimelineItemKind = "thinking" | "tool" | "text" | "compact" | "command";
 
 interface ToolUseState {
@@ -166,7 +166,7 @@ function settleInterruptedTools(tools?: ToolUseState[]) {
     tool.status === "running"
       ? {
           ...tool,
-          status: "error" as const,
+          status: "interrupted" as const,
         }
       : tool,
   );
@@ -174,7 +174,7 @@ function settleInterruptedTools(tools?: ToolUseState[]) {
 
 function settleRunningTimelineItems(
   timeline: MessageTimelineItem[],
-  status: Extract<ToolState, "done" | "error">,
+  status: Extract<ToolState, "done" | "error" | "interrupted">,
 ) {
   const endedAt = Date.now();
   return timeline.map((item) =>
@@ -606,12 +606,15 @@ export function ManagerChatPanel({
   const chatSessionQuery = useChatSession(projectId, sessionId ?? undefined, Boolean(sessionId), {
     refetchInterval: effectiveManagerAuto?.enabled && !activeStreamControllerRef.current ? 4_000 : false,
   });
+  const appSettingsQuery = useAppSettings();
+  const chatSingleSource = appSettingsQuery.data?.chat_single_source ?? false;
   const refetchChatSession = chatSessionQuery.refetch;
 
   const attachments = useWorkspaceUiStore((s) => s.attachmentsByProject[projectId] ?? EMPTY_ATTACHMENTS);
   const scriptPreference = useWorkspaceUiStore((s) => s.scriptPreferenceByProject?.[projectId] ?? "auto");
   const globalPythonRuntime = useWorkspaceUiStore((s) => s.globalPythonRuntimeByProject?.[projectId]);
   const globalRRuntime = useWorkspaceUiStore((s) => s.globalRRuntimeByProject?.[projectId]);
+  const setCurrentChatSessionId = useWorkspaceUiStore((s) => s.setCurrentChatSessionId);
   const addAttachment = useWorkspaceUiStore((s) => s.addAttachment);
   const removeAttachment = useWorkspaceUiStore((s) => s.removeAttachment);
   const clearAttachments = useWorkspaceUiStore((s) => s.clearAttachments);
@@ -824,6 +827,7 @@ export function ManagerChatPanel({
   useEffect(() => {
     const nextSessionKey = `${projectId}:${sessionId ?? ""}`;
     const sessionChanged = currentSessionKeyRef.current !== nextSessionKey;
+    const oldSessionId = currentSessionIdRef.current;
     currentSessionKeyRef.current = nextSessionKey;
     currentSessionIdRef.current = sessionId ?? null;
     if (sessionChanged) {
@@ -861,7 +865,11 @@ export function ManagerChatPanel({
       setSlashCommandState(null);
       setSlashCommandIndex(0);
       setEffortMenuOpen(false);
-      setMessages([]);
+      // §10.5 preserve optimistic user message when creating a new session
+      const isNewSessionCreation = !oldSessionId && sessionId;
+      if (!isNewSessionCreation) {
+        setMessages([]);
+      }
     }
   }, [projectId, sessionId]);
 
@@ -894,6 +902,10 @@ export function ManagerChatPanel({
     if (!sessionId || hydratedSessionIdRef.current !== sessionId || typeof window === "undefined") {
       return;
     }
+    if (chatSingleSource) {
+      // Single-source mode: backend owns persistence; no frontend PUT saves.
+      return;
+    }
     if (remoteHydratingRef.current) {
       remoteHydratingRef.current = false;
       return;
@@ -915,7 +927,7 @@ export function ManagerChatPanel({
         saveTimerRef.current = null;
       }
     };
-  }, [messages, projectId, saveSessionMutation, sessionId]);
+  }, [messages, projectId, saveSessionMutation, sessionId, chatSingleSource]);
 
   useEffect(() => {
     autoSessionEventSourceRef.current?.close();
@@ -949,11 +961,9 @@ export function ManagerChatPanel({
           revision?: number;
           seq?: number;
         };
-        if (payload.type === "message_upsert" && isAutoOwnerSession && effectiveManagerAuto?.enabled) {
-          void queryClient.refetchQueries({ queryKey: queryKeys.managerAuto(projectId, sessionId), type: "active" });
-        }
         if (payload.type === "stream_event" && payload.message_id && payload.event) {
-          if (!isAutoOwnerSession || !effectiveManagerAuto?.enabled) {
+          const autoSubscribed = isAutoOwnerSession && effectiveManagerAuto?.enabled;
+          if (!autoSubscribed && !chatSingleSource) {
             return;
           }
           if (typeof payload.seq === "number") {
@@ -970,6 +980,9 @@ export function ManagerChatPanel({
           if (payload.event.type === "done" || payload.event.type === "error") {
             activeAutoStreamMessagesRef.current.delete(payload.message_id);
             autoStreamSeqRef.current.delete(payload.message_id);
+            if (chatSingleSource && !autoSubscribed) {
+              setBusy(false);
+            }
           } else {
             activeAutoStreamMessagesRef.current.add(payload.message_id);
           }
@@ -979,12 +992,22 @@ export function ManagerChatPanel({
         if (payload.type !== "message_upsert" || !payload.message) {
           return;
         }
+        if (payload.type === "message_upsert" && isAutoOwnerSession && effectiveManagerAuto?.enabled) {
+          void queryClient.refetchQueries({ queryKey: queryKeys.managerAuto(projectId, sessionId), type: "active" });
+        }
         if (shouldIgnoreIncomingSessionMessage(payload.message)) {
           return;
         }
         if (payload.message.state === "done" || payload.message.state === "error") {
           activeAutoStreamMessagesRef.current.delete(payload.message.id);
           autoStreamSeqRef.current.delete(payload.message.id);
+          if (
+            chatSingleSource &&
+            !(isAutoOwnerSession && effectiveManagerAuto?.enabled) &&
+            payload.message.role === "manager"
+          ) {
+            setBusy(false);
+          }
         }
         const incoming = normalizeSessionMessages([payload.message]);
         if (!incoming.length) return;
@@ -1027,7 +1050,7 @@ export function ManagerChatPanel({
       activeAutoStreamMessagesRef.current.clear();
       autoStreamSeqRef.current.clear();
     };
-  }, [effectiveManagerAuto?.enabled, isAutoOwnerSession, projectId, queryClient, refetchChatSession, sessionId]);
+  }, [effectiveManagerAuto?.enabled, isAutoOwnerSession, projectId, queryClient, refetchChatSession, sessionId, chatSingleSource]);
 
   useEffect(() => () => {
     if (saveTimerRef.current !== null && typeof window !== "undefined") {
@@ -1830,8 +1853,9 @@ export function ManagerChatPanel({
     return false;
   }
 
-  async function runManualCompaction() {
-    if (busy || !sessionId) return;
+  async function runManualCompaction(targetSessionId?: string) {
+    const effectiveSessionId = targetSessionId || sessionId;
+    if (busy || !effectiveSessionId) return;
     const startedAt = Date.now();
     const compactId = `compact_manual_${Date.now().toString(36)}`;
     upsertCompactMessage({
@@ -1845,21 +1869,27 @@ export function ManagerChatPanel({
     setBusy(true);
     setError(null);
     try {
-      const response = await api.compactChatSession(projectId, serializeSessionMessages(messages), thinkingEffort, sessionId);
-      finalizeCompaction({
-        id: compactId,
-        kind: "compact",
-        content: response.summary,
-        status: "done",
-        startedAt,
-        endedAt: Date.now(),
-        durationMs: response.duration_ms,
-        firstKeptMessageId: response.first_kept_message_id,
-        tokensBefore: response.tokens_before,
-        tokensAfter: response.tokens_after,
-        provider: response.provider ?? undefined,
-        model: response.model ?? undefined,
-      });
+      const response = await api.compactChatSession(projectId, serializeSessionMessages(messages), thinkingEffort, effectiveSessionId);
+      if (chatSingleSource) {
+        // In single-source mode the backend persists the compact summary and
+        // truncates the session. Refresh the canonical snapshot.
+        await refetchChatSession();
+      } else {
+        finalizeCompaction({
+          id: compactId,
+          kind: "compact",
+          content: response.summary,
+          status: "done",
+          startedAt,
+          endedAt: Date.now(),
+          durationMs: response.duration_ms,
+          firstKeptMessageId: response.first_kept_message_id,
+          tokensBefore: response.tokens_before,
+          tokensAfter: response.tokens_after,
+          provider: response.provider ?? undefined,
+          model: response.model ?? undefined,
+        });
+      }
     } catch (nextError) {
       const message = nextError instanceof Error ? nextError.message : "上下文压缩失败。";
       setError(message);
@@ -1877,10 +1907,25 @@ export function ManagerChatPanel({
   }
 
   async function submit() {
-    if (!draft.trim() || busy || !sessionId) return;
+    if (!draft.trim() || busy) return;
+
+    let effectiveSessionId = sessionId;
+
+    // §10.5 new-session flow: create a session if none exists
+    if (!effectiveSessionId) {
+      try {
+        const { session } = await api.createChatSession(projectId);
+        effectiveSessionId = session.session_id;
+        setCurrentChatSessionId(projectId, effectiveSessionId);
+      } catch (nextError) {
+        setError(nextError instanceof Error ? nextError.message : "创建会话失败。");
+        return;
+      }
+    }
+
     const text = draft.trim();
     if (text === "/compact") {
-      await runManualCompaction();
+      await runManualCompaction(effectiveSessionId);
       return;
     }
     const priorMessages = messages;
@@ -1898,6 +1943,8 @@ export function ManagerChatPanel({
     const suffix = createMessageId().replace("msg_", "");
     const userMessageId = isSlashCommand ? `cmd_usr_${suffix}` : createMessageId();
     const managerMessageId = isSlashCommand ? `cmd_mgr_${suffix}` : createMessageId();
+    const showLegacyManagerPlaceholder =
+      !chatSingleSource && !(isAutoOwnerSession && effectiveManagerAuto?.enabled && !isSlashCommand);
     setMessages((prev) => [
       ...prev,
       {
@@ -1908,9 +1955,9 @@ export function ManagerChatPanel({
         state: "done",
         timeline: [{ id: `${userMessageId}_text`, kind: isSlashCommand ? "command" : "text", content: text, status: "done" }],
       },
-      ...(isAutoOwnerSession && effectiveManagerAuto?.enabled && !isSlashCommand
-        ? []
-        : [{ id: managerMessageId, role: "manager" as const, content: "", thinking: "", thinkingState: "idle" as const, tools: [], state: "thinking" as const, timeline: [] }]),
+      ...(showLegacyManagerPlaceholder
+        ? [{ id: managerMessageId, role: "manager" as const, content: "", thinking: "", thinkingState: "idle" as const, tools: [], state: "thinking" as const, timeline: [] }]
+        : []),
     ]);
     setDraft("");
     if (messageAttachments.length) {
@@ -1921,7 +1968,7 @@ export function ManagerChatPanel({
     stopRequestedRef.current = false;
     if (isAutoOwnerSession && effectiveManagerAuto?.enabled && !isSlashCommand) {
       try {
-        const response = await api.addManagerAutoDirective(projectId, sessionId, text, userMessageId);
+        const response = await api.addManagerAutoDirective(projectId, effectiveSessionId, text, userMessageId);
         applyManagerAutoState(response.state);
         clearAttachments(projectId);
         const ack = response.wake_event ? "已收到追加指令，AUTO 正在处理。" : "已加入 auto 指令队列，将在下一次唤醒时处理。";
@@ -1941,6 +1988,40 @@ export function ManagerChatPanel({
         setError(nextError instanceof Error ? nextError.message : "追加 auto 指令失败。");
       } finally {
         setBusy(false);
+      }
+      return;
+    }
+    if (chatSingleSource && !isSlashCommand) {
+      const abortController = new AbortController();
+      activeStreamControllerRef.current = abortController;
+      try {
+        const { sessionId: returnedSessionId, done } = await api.sendChat(
+          projectId,
+          context,
+          thinkingEffort,
+          history,
+          serializeSessionMessages(priorMessages),
+          chatContext,
+          effectiveSessionId,
+          userMessageId,
+          abortController.signal,
+        );
+        // If the backend created a new session, adopt it
+        if (returnedSessionId && !sessionId) {
+          setCurrentChatSessionId(projectId, returnedSessionId);
+        }
+        // Backend is now streaming the manager response. Rendering is driven by
+        // the events SSE subscription; the HTTP response body is consumed in the
+        // background only to keep the generator alive.
+        void done.finally(() => {
+          activeStreamControllerRef.current = null;
+          stopRequestedRef.current = false;
+        });
+      } catch (nextError) {
+        setError(nextError instanceof Error ? nextError.message : "Chat failed.");
+        setBusy(false);
+        activeStreamControllerRef.current = null;
+        stopRequestedRef.current = false;
       }
       return;
     }
@@ -1965,7 +2046,7 @@ export function ManagerChatPanel({
         },
         abortController.signal,
         chatContext,
-        sessionId,
+        effectiveSessionId,
         userMessageId,
       );
       if (streamError) {
@@ -1983,7 +2064,7 @@ export function ManagerChatPanel({
           thinkingState: current.thinkingState === "running" ? "done" : current.thinkingState,
           content: current.content || "已停止本次生成。",
           thinking: current.thinking,
-          timeline: settleRunningTimelineItems(current.timeline ?? [], "done"),
+          timeline: settleRunningTimelineItems(current.timeline ?? [], "interrupted"),
         }));
         return;
       }
@@ -1997,7 +2078,7 @@ export function ManagerChatPanel({
                     ...message,
                     state: message.state === "error" ? ("error" as const) : ("done" as const),
                     thinkingState: message.thinkingState === "running" ? "done" : message.thinkingState,
-                    timeline: settleRunningTimelineItems(message.timeline ?? [], "done"),
+                    timeline: settleRunningTimelineItems(message.timeline ?? [], "interrupted"),
                   }
                 : message,
             )
@@ -2187,7 +2268,7 @@ export function ManagerChatPanel({
   // ref so it never triggers re-renders by itself.
   const messageRenderCacheRef = useRef<Map<string, { sig: string; node: ReactNode }>>(new Map());
   const sessionLoadError = chatSessionQuery.error instanceof Error ? chatSessionQuery.error.message : null;
-  const sessionBusy = !sessionId || chatSessionQuery.isLoading;
+  const sessionBusy = Boolean(sessionId) && chatSessionQuery.isLoading;
   const composerInputDisabled = sessionBusy || Boolean(sessionLoadError) || autoScopedActive;
   const composerSendDisabled =
     autoComposerState === "auto_running"
@@ -2274,7 +2355,13 @@ export function ManagerChatPanel({
       );
     }
     if (item.kind === "tool") {
-      const label = item.label || (item.status === "running" ? "正在执行工具" : "已完成工具调用");
+      const label =
+        item.label ||
+        (item.status === "running"
+          ? "正在执行工具"
+          : item.status === "interrupted"
+            ? "已中断工具调用"
+            : "已完成工具调用");
       const running = item.status === "running";
       return (
         <div key={item.id} className={`manager-tool-divider ${item.status ?? "done"}`}>

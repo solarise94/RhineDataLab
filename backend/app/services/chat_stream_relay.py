@@ -1,8 +1,14 @@
 from __future__ import annotations
 
+import json
+import threading
 import time
 from collections.abc import Iterator
 from typing import Any
+
+
+class StreamInterrupted(BaseException):
+    """Raised when an HTTP client disconnects mid-stream."""
 
 from app.models.chat import ChatRequest, ChatResponse, ChatSessionMessage, ChatSessionMessageTimelineItem, ChatTokenUsage
 from app.models.patches import Proposal
@@ -95,6 +101,117 @@ class ChatStreamRelay:
                 message.content = "AUTO 处理意外中断。"
             self.chat_session_service.upsert_message(project_id, session_id, message)
             raise
+
+    def stream_to_http(
+        self,
+        project_id: str,
+        session_id: str,
+        request: ChatRequest,
+        *,
+        message_id: str,
+        initial_thinking: str | None = None,
+        disconnect_event: threading.Event | None = None,
+    ) -> Iterator[bytes]:
+        """Mirror run_to_session logic, but yield SSE bytes to HTTP consumers.
+
+        Persists via chat_session_service.upsert_message and fans out via
+        chat_session_service.publish_stream_event exactly as run_to_session does.
+        Yields ``data: {json.dumps(payload)}\n\n`` for every published stream_event
+        (including batched ones) and a final ``message_upsert`` event after the last
+        upsert_message so HTTP consumers see the authoritative snapshot.
+
+        On a stream error event or unexpected exception, settles the message to
+        ``error``, persists it, and yields an ``error`` SSE event. If the HTTP client
+        disconnects (``GeneratorExit`` or ``disconnect_event``), the message and any
+        running timeline items are settled to ``interrupted`` (message state becomes
+        ``done``) and the exception is re-raised so the generator closes cleanly.
+        """
+        message = self._initial_stream_message(message_id, initial_thinking)
+        self.chat_session_service.upsert_message(project_id, session_id, message)
+        saw_response = False
+        last_persisted_at = time.monotonic()
+        last_published_at = last_persisted_at
+        pending_stream_payloads: list[dict[str, Any]] = []
+        stream_seq = 0
+        yielded_error = False
+
+        def _yield_event(payload: dict[str, Any]) -> bytes:
+            return f"data: {json.dumps(payload)}\n\n".encode()
+
+        def flush_pending_stream_payloads(now: float) -> Iterator[bytes]:
+            nonlocal last_published_at, stream_seq
+            if not pending_stream_payloads:
+                return
+            for pending_payload in pending_stream_payloads:
+                stream_seq += 1
+                self.chat_session_service.publish_stream_event(
+                    project_id,
+                    session_id,
+                    message_id=message.id,
+                    event=pending_payload,
+                    seq=stream_seq,
+                )
+                yield _yield_event(pending_payload)
+            pending_stream_payloads.clear()
+            last_published_at = now
+
+        def _check_disconnect() -> None:
+            if disconnect_event is not None and disconnect_event.is_set():
+                raise StreamInterrupted()
+
+        try:
+            for payload in self._iter_stream_payloads(project_id, request):
+                _check_disconnect()
+                message = self._apply_stream_payload(message, payload)
+                event_type = payload.get("type")
+                if event_type == "response":
+                    saw_response = True
+                now = time.monotonic()
+                if self._is_immediate_stream_event(event_type):
+                    yield from flush_pending_stream_payloads(now)
+                    stream_seq += 1
+                    self.chat_session_service.publish_stream_event(
+                        project_id,
+                        session_id,
+                        message_id=message.id,
+                        event=payload,
+                        seq=stream_seq,
+                    )
+                    yield _yield_event(payload)
+                    last_published_at = now
+                else:
+                    pending_stream_payloads.append(payload)
+                    if now - last_published_at >= STREAM_EVENT_PUBLISH_INTERVAL_SECONDS:
+                        yield from flush_pending_stream_payloads(now)
+                if self._should_persist_stream_event(event_type, now, last_persisted_at):
+                    self.chat_session_service.upsert_message(project_id, session_id, message)
+                    last_persisted_at = now
+                if event_type == "error":
+                    raise RuntimeError(str(payload.get("detail") or "Manager stream failed."))
+                _check_disconnect()
+            yield from flush_pending_stream_payloads(time.monotonic())
+            if message.state not in {"done", "error"}:
+                message = self.settle_stream_message(message, "done")
+            if not saw_response and not message.content.strip():
+                raise RuntimeError("Manager stream ended without a response.")
+            self.chat_session_service.upsert_message(project_id, session_id, message)
+            yield _yield_event({"type": "message_upsert", "message": message.model_dump()})
+            return
+        except (GeneratorExit, StreamInterrupted):
+            message = self.settle_stream_message(message, "interrupted")
+            if not message.content:
+                message.content = "生成已停止。"
+            self.chat_session_service.upsert_message(project_id, session_id, message)
+            raise
+        except Exception:
+            message = self.settle_stream_message(message, "error")
+            if not message.content:
+                message.content = "AUTO 处理意外中断。"
+            self.chat_session_service.upsert_message(project_id, session_id, message)
+            if not yielded_error:
+                yield _yield_event({"type": "error", "detail": message.content})
+                yielded_error = True
+            return
 
     def settle_message(self, project_id: str, session_id: str, message_id: str, status: str) -> None:
         session = self.chat_session_service.get_session(project_id, session_id)

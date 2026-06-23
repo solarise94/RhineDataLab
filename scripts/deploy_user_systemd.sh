@@ -333,6 +333,7 @@ check_unknown_blueprint_env_keys() {
     BLUEPRINT_CLAUDE_CODE_COMMAND_JSON
     BLUEPRINT_CODEX_COMMAND_JSON
     BLUEPRINT_BIOCONDUCTOR_MIRROR
+    BLUEPRINT_CHAT_SINGLE_SOURCE
     BLUEPRINT_CRAN_MIRROR
     BLUEPRINT_DATA_DIRECTORY_ROOTS
     BLUEPRINT_DATA_MOUNT_HASH_LIMIT_BYTES
@@ -646,6 +647,10 @@ PY
   # Whitelist-based, single-write backend environment
   # NOTE: this list is the runtime contract. When backend Settings adds a new
   # deployment-relevant field, it must be added here so systemd services pick it up.
+  #
+  # Feature flag: BLUEPRINT_CHAT_SINGLE_SOURCE — when true, manual chat routes
+  # through ChatStreamRelay so the backend becomes the single source of truth
+  # for chat sessions. Default false (not set).
   _write_env_once() {
     local file="$1"
     shift
@@ -670,6 +675,7 @@ PY
     "BLUEPRINT_BWRAP_BIN=${BLUEPRINT_BWRAP_BIN:-${BWRAP_BIN}}" \
     "BLUEPRINT_EXECUTOR_MAMBA_ROOT_PREFIX=${BLUEPRINT_EXECUTOR_MAMBA_ROOT_PREFIX:-${MAMBA_ROOT_PREFIX:-${BLUEPRINT_EXECUTOR_CONDA_BASE:-${CONDA_BASE}}}}" \
     "BLUEPRINT_EXECUTOR_MAMBARC=${BLUEPRINT_EXECUTOR_MAMBARC:-${MAMBARC:-}}" \
+    "BLUEPRINT_CHAT_SINGLE_SOURCE=${BLUEPRINT_CHAT_SINGLE_SOURCE:-}" \
     "BLUEPRINT_CRAN_MIRROR=${BLUEPRINT_CRAN_MIRROR:-}" \
     "BLUEPRINT_BIOCONDUCTOR_MIRROR=${BLUEPRINT_BIOCONDUCTOR_MIRROR:-}" \
     "BLUEPRINT_PYPI_MIRROR=${BLUEPRINT_PYPI_MIRROR:-}" \
